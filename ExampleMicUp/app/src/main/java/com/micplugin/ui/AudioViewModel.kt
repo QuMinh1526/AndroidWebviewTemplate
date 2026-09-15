@@ -1,0 +1,412 @@
+package com.micplugin.ui
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.micplugin.audio.AudioEngine
+import com.micplugin.audio.AudioLevels
+import com.micplugin.plugin.*
+import com.micplugin.preset.EffectState
+import com.micplugin.preset.Preset
+import com.micplugin.preset.PresetManager
+import com.micplugin.plugin.PluginPathPrefs
+import com.micplugin.service.ShizukuManager
+import com.micplugin.service.SoftwareLoopback
+import com.micplugin.service.ShizukuState
+import com.micplugin.service.VirtualMicService
+import com.micplugin.service.VirtualMicTier
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import java.util.UUID
+import javax.inject.Inject
+
+data class GateState(
+    val enabled: Boolean = true,
+    val thresholdDb: Float = -50f,
+    val attackMs: Float = 5f,
+    val releaseMs: Float = 150f,
+)
+
+data class EqState(
+    val enabled: Boolean = true,
+    val bands: List<Float> = List(10) { 0f },
+)
+
+data class CompState(
+    val enabled: Boolean = true,
+    val thresholdDb: Float = -18f,
+    val ratio: Float = 4f,
+    val attackMs: Float = 10f,
+    val releaseMs: Float = 100f,
+    val makeupDb: Float = 0f,
+)
+
+data class ReverbState(
+    val enabled: Boolean = false,
+    val mix: Float = 0f,
+    val roomSize: Float = 0.5f,
+    val damping: Float = 0.5f,
+)
+
+data class PitchState(
+    val enabled: Boolean = false,
+    val semitones: Float = 0f,
+)
+
+data class GainState(
+    val enabled: Boolean = false,
+    val value: Float = 0f,
+)
+
+data class EchoState(
+    val enabled: Boolean = false,
+    val value: Float = 0f,
+)
+
+@HiltViewModel
+class AudioViewModel @Inject constructor(
+    private val audioEngine: AudioEngine,
+    private val pluginManager: PluginManager,
+    private val presetManager: PresetManager,
+    private val virtualMicService: VirtualMicService,
+    private val shizukuManager: ShizukuManager,
+    private val pluginPathPrefs: PluginPathPrefs,
+) : ViewModel() {
+
+    val levels:      StateFlow<AudioLevels>    = audioEngine.levels
+    val engineStatus = audioEngine.status
+    val pluginSlots: StateFlow<List<PluginSlot>> = audioEngine.pluginChain.slots
+    val discovered:  StateFlow<List<PluginDescriptor>> = pluginManager.discovered
+    val presets:     StateFlow<List<Preset>>   = presetManager.presets
+    val virtualMicTier: StateFlow<VirtualMicTier> = virtualMicService.activeTier
+    val shizukuState: StateFlow<ShizukuState> = shizukuManager.state
+
+    private val _gateState   = MutableStateFlow(GateState())
+    private val _eqState     = MutableStateFlow(EqState())
+    private val _compState   = MutableStateFlow(CompState())
+    private val _reverbState = MutableStateFlow(ReverbState())
+    private val _pitchState  = MutableStateFlow(PitchState())
+    private val _gainState   = MutableStateFlow(GainState())
+    private val _echoState   = MutableStateFlow(EchoState())
+    private val _masterBypass = MutableStateFlow(false)
+
+    val gateState:    StateFlow<GateState>    = _gateState
+    val eqState:      StateFlow<EqState>      = _eqState
+    val compState:    StateFlow<CompState>    = _compState
+    val reverbState:  StateFlow<ReverbState>  = _reverbState
+    val pitchState:   StateFlow<PitchState>   = _pitchState
+    val gainState:    StateFlow<GainState>   = _gainState
+    val echoState:    StateFlow<EchoState>   = _echoState
+    val masterBypass: StateFlow<Boolean>      = _masterBypass
+
+    private val _selectedPreset = MutableStateFlow<Preset?>(null)
+    val selectedPreset: StateFlow<Preset?> = _selectedPreset
+
+    init {
+        viewModelScope.launch { presetManager.loadAll() }
+        viewModelScope.launch { pluginManager.scanAll() }
+        // When tier upgrades to Shizuku/Root, tell C++ engine to stop zeroing output
+        viewModelScope.launch {
+            virtualMicService.activeTier.collect { tier ->
+                val inject = tier == VirtualMicTier.SHIZUKU_ADB || tier == VirtualMicTier.ROOT_MAGISK
+                audioEngine.setInjectionMode(inject)
+            }
+        }
+    }
+
+    // ── Engine control ─────────────────────────────────────────────────────────
+    fun toggleEngine(context: android.content.Context) {
+        if (engineStatus.value.isRunning) {
+            com.micplugin.service.AudioProcessingService.stop(context)
+        } else {
+            com.micplugin.service.AudioProcessingService.start(context)
+        }
+    }
+
+    fun setMasterBypass(bypass: Boolean) {
+        _masterBypass.value = bypass
+        audioEngine.setMasterBypass(bypass)
+    }
+
+    // ── Gate ──────────────────────────────────────────────────────────────────
+    fun setGateEnabled(on: Boolean) {
+        _gateState.value = _gateState.value.copy(enabled = on)
+        audioEngine.setGateEnabled(on)
+    }
+    fun setGateThreshold(db: Float) {
+        _gateState.value = _gateState.value.copy(thresholdDb = db)
+        audioEngine.setGateThreshold(db)
+    }
+    fun setGateAttack(ms: Float) {
+        _gateState.value = _gateState.value.copy(attackMs = ms)
+        audioEngine.setGateAttack(ms)
+    }
+    fun setGateRelease(ms: Float) {
+        _gateState.value = _gateState.value.copy(releaseMs = ms)
+        audioEngine.setGateRelease(ms)
+    }
+
+    // ── EQ ────────────────────────────────────────────────────────────────────
+    fun setEqEnabled(on: Boolean) {
+        _eqState.value = _eqState.value.copy(enabled = on)
+        audioEngine.setEqEnabled(on)
+    }
+    fun setEqBand(band: Int, db: Float) {
+        val bands = _eqState.value.bands.toMutableList()
+        bands[band] = db
+        _eqState.value = _eqState.value.copy(bands = bands)
+        audioEngine.setEqBand(band, db)
+    }
+
+    // ── Compressor ────────────────────────────────────────────────────────────
+    fun setCompEnabled(on: Boolean) {
+        _compState.value = _compState.value.copy(enabled = on)
+        audioEngine.setCompEnabled(on)
+    }
+    fun setCompThreshold(db: Float) {
+        _compState.value = _compState.value.copy(thresholdDb = db)
+        audioEngine.setCompThreshold(db)
+    }
+    fun setCompRatio(ratio: Float) {
+        _compState.value = _compState.value.copy(ratio = ratio)
+        audioEngine.setCompRatio(ratio)
+    }
+    fun setCompAttack(ms: Float) {
+        _compState.value = _compState.value.copy(attackMs = ms)
+        audioEngine.setCompAttack(ms)
+    }
+    fun setCompRelease(ms: Float) {
+        _compState.value = _compState.value.copy(releaseMs = ms)
+        audioEngine.setCompRelease(ms)
+    }
+    fun setCompMakeup(db: Float) {
+        _compState.value = _compState.value.copy(makeupDb = db)
+        audioEngine.setCompMakeup(db)
+    }
+
+    // ── Reverb ────────────────────────────────────────────────────────────────
+    fun setReverbEnabled(on: Boolean) {
+        _reverbState.value = _reverbState.value.copy(enabled = on)
+        audioEngine.setReverbEnabled(on)
+    }
+    fun setReverbMix(mix: Float) {
+        _reverbState.value = _reverbState.value.copy(mix = mix)
+        audioEngine.setReverbMix(mix)
+    }
+    fun setReverbRoom(size: Float) {
+        _reverbState.value = _reverbState.value.copy(roomSize = size)
+        audioEngine.setReverbRoom(size)
+    }
+    fun setReverbDamp(d: Float) {
+        _reverbState.value = _reverbState.value.copy(damping = d)
+        audioEngine.setReverbDamp(d)
+    }
+
+    // ── Pitch ─────────────────────────────────────────────────────────────────
+    fun setPitchEnabled(on: Boolean) {
+        _pitchState.value = _pitchState.value.copy(enabled = on)
+        audioEngine.setPitchEnabled(on)
+    }
+    fun setPitchSemitones(st: Float) {
+        _pitchState.value = _pitchState.value.copy(semitones = st)
+        audioEngine.setPitchSemitones(st)
+    }
+
+    // ── Gain ─────────────────────────────────────────────────────────────────
+    fun setGainEnabled(on: Boolean) {
+        _gainState.value = _gainState.value.copy(enabled = on)
+        audioEngine.setGainEnabled(on)
+    }
+    fun setGain(value: Float) {
+        _gainState.value = _gainState.value.copy(value = value)
+        audioEngine.setGain(value)
+    }
+
+    // ── Echo ─────────────────────────────────────────────────────────────────
+    fun setEchoEnabled(on: Boolean) {
+        _echoState.value = _echoState.value.copy(enabled = on)
+        audioEngine.setEchoEnabled(on)
+    }
+    fun setEcho(value: Float) {
+        _echoState.value = _echoState.value.copy(value = value)
+        audioEngine.setEcho(value)
+    }
+
+    // ── Plugin chain ──────────────────────────────────────────────────────────
+    fun addPlugin(descriptor: PluginDescriptor) {
+        viewModelScope.launch {
+            val handle = if (descriptor.format != PluginFormat.APK)
+                audioEngine.loadNativePlugin(descriptor.path, descriptor.format) else 0L
+            val slot = PluginSlot(descriptor = descriptor, nativeHandle = handle)
+            audioEngine.pluginChain.addPlugin(slot)
+        }
+    }
+
+    fun removePlugin(id: UUID) {
+        val slot = audioEngine.pluginChain.getSlot(id) ?: return
+        if (slot.nativeHandle != 0L) audioEngine.unloadNativePlugin(slot.nativeHandle)
+        audioEngine.pluginChain.removePlugin(id)
+    }
+
+    fun togglePlugin(id: UUID) = audioEngine.pluginChain.toggleEnabled(id)
+
+    fun reorderPlugin(from: Int, to: Int) = audioEngine.pluginChain.reorder(from, to)
+
+    fun setPluginParam(slotId: UUID, paramId: Int, value: Float) {
+        val slot = audioEngine.pluginChain.getSlot(slotId) ?: return
+        if (slot.nativeHandle != 0L)
+            audioEngine.setNativePluginParam(slot.nativeHandle, paramId, value)
+        audioEngine.pluginChain.updateParam(slotId, paramId, value)
+    }
+
+    // ── Presets ───────────────────────────────────────────────────────────────
+    fun applyPreset(preset: Preset) {
+        _selectedPreset.value = preset
+        val e = preset.effects
+        setGateEnabled(e.gateEnabled);     setGateThreshold(e.gateThreshold)
+        setGateAttack(e.gateAttack);       setGateRelease(e.gateRelease)
+        setEqEnabled(e.eqEnabled);         e.eqBands.forEachIndexed { i, db -> setEqBand(i, db) }
+        setCompEnabled(e.compEnabled);     setCompThreshold(e.compThreshold)
+        setCompRatio(e.compRatio);         setCompAttack(e.compAttack)
+        setCompRelease(e.compRelease);     setCompMakeup(e.compMakeup)
+        setReverbEnabled(e.reverbEnabled); setReverbMix(e.reverbMix)
+        setReverbRoom(e.reverbRoom);       setReverbDamp(e.reverbDamp)
+        setPitchEnabled(e.pitchEnabled);   setPitchSemitones(e.pitchSemitones)
+        setGainEnabled(e.gainEnabled);     setGain(e.gain)
+        setEchoEnabled(e.echoEnabled);     setEcho(e.echo)
+        _gateState.value   = GateState(e.gateEnabled, e.gateThreshold, e.gateAttack, e.gateRelease)
+        _eqState.value     = EqState(e.eqEnabled, e.eqBands)
+        _compState.value   = CompState(e.compEnabled, e.compThreshold, e.compRatio, e.compAttack, e.compRelease, e.compMakeup)
+        _reverbState.value = ReverbState(e.reverbEnabled, e.reverbMix, e.reverbRoom, e.reverbDamp)
+        _pitchState.value  = PitchState(e.pitchEnabled, e.pitchSemitones)
+        _gainState.value   = GainState(e.gainEnabled, e.gain)
+        _echoState.value   = EchoState(e.echoEnabled, e.echo)
+    }
+
+    fun savePreset(name: String) {
+        val preset = Preset(
+            name    = name,
+            effects = EffectState(
+                gateEnabled   = _gateState.value.enabled,
+                gateThreshold = _gateState.value.thresholdDb,
+                gateAttack    = _gateState.value.attackMs,
+                gateRelease   = _gateState.value.releaseMs,
+                eqEnabled     = _eqState.value.enabled,
+                eqBands       = _eqState.value.bands,
+                compEnabled   = _compState.value.enabled,
+                compThreshold = _compState.value.thresholdDb,
+                compRatio     = _compState.value.ratio,
+                compAttack    = _compState.value.attackMs,
+                compRelease   = _compState.value.releaseMs,
+                compMakeup    = _compState.value.makeupDb,
+                reverbEnabled = _reverbState.value.enabled,
+                reverbMix     = _reverbState.value.mix,
+                reverbRoom    = _reverbState.value.roomSize,
+                reverbDamp    = _reverbState.value.damping,
+                pitchEnabled  = _pitchState.value.enabled,
+                pitchSemitones = _pitchState.value.semitones,
+                gainEnabled   = _gainState.value.enabled,
+                gain           = _gainState.value.value,
+                echoEnabled   = _echoState.value.enabled,
+                echo           = _echoState.value.value,
+            ),
+        )
+        viewModelScope.launch { presetManager.save(preset) }
+    }
+
+    fun rescan() { viewModelScope.launch { pluginManager.scanAll() } }
+
+    fun requestShizukuPermission() { shizukuManager.requestPermission() }
+
+    /** Returns null if available, or a reason string if not. */
+    fun checkTierAvailability(tier: com.micplugin.service.VirtualMicTier): String? =
+        virtualMicService.checkTierAvailability(tier)
+
+    /** Manually switch to a tier. Returns unavailability reason or null on success. */
+    fun setTier(tier: com.micplugin.service.VirtualMicTier): String? =
+        virtualMicService.setTier(tier)
+
+    val lv2Paths  = pluginPathPrefs.lv2Paths
+    val clapPaths = pluginPathPrefs.clapPaths
+    val vst3Paths = pluginPathPrefs.vst3Paths
+
+    fun addPluginPath(context: android.content.Context, format: com.micplugin.plugin.PluginFormat, path: String) {
+        pluginPathPrefs.addPath(context, format, path)
+    }
+    fun removePluginPath(context: android.content.Context, format: com.micplugin.plugin.PluginFormat, path: String) {
+        pluginPathPrefs.removePath(context, format, path)
+    }
+    fun allPluginPaths(context: android.content.Context, format: com.micplugin.plugin.PluginFormat) =
+        pluginPathPrefs.allPaths(context, format)
+
+
+    private val _monitoringEnabled = MutableStateFlow(true)
+    val monitoringEnabled: kotlinx.coroutines.flow.StateFlow<Boolean> = _monitoringEnabled
+
+    fun setMonitoring(context: android.content.Context, enabled: Boolean) {
+        _monitoringEnabled.value = enabled
+        SoftwareLoopback.setMonitorEnabled(enabled)
+        // Remember the choice so it survives app/process restarts.
+        context.getSharedPreferences("micup_prefs", android.content.Context.MODE_PRIVATE)
+            .edit().putBoolean("monitor_enabled", enabled).apply()
+    }
+
+    fun loadMonitoring(context: android.content.Context) {
+        val saved = context.getSharedPreferences("micup_prefs", android.content.Context.MODE_PRIVATE)
+            .getBoolean("monitor_enabled", true)
+        _monitoringEnabled.value = saved
+        SoftwareLoopback.setMonitorEnabled(saved)
+    }
+
+
+    fun getPluginParamsJson(nativeHandle: Long): String =
+        audioEngine.getPluginParamsJson(nativeHandle)
+
+
+    private val _outputDevices = MutableStateFlow<List<com.micplugin.service.OutputDevice>>(emptyList())
+    val outputDevices: kotlinx.coroutines.flow.StateFlow<List<com.micplugin.service.OutputDevice>> = _outputDevices
+
+    private val _selectedOutputDeviceId = MutableStateFlow(-1)
+    val selectedOutputDeviceId: kotlinx.coroutines.flow.StateFlow<Int> = _selectedOutputDeviceId
+
+    fun loadOutputDevices(context: android.content.Context) {
+        _outputDevices.value = SoftwareLoopback.getOutputDevices(context)
+        // Restore saved selection
+        val saved = context.getSharedPreferences("micup_prefs", android.content.Context.MODE_PRIVATE)
+            .getInt("output_device_id", -1)
+        _selectedOutputDeviceId.value = saved
+        SoftwareLoopback.setOutputDevice(context, saved)
+    }
+
+    fun setOutputDevice(context: android.content.Context, deviceId: Int) {
+        _selectedOutputDeviceId.value = deviceId
+        SoftwareLoopback.setOutputDevice(context, deviceId)
+        // Persist selection
+        context.getSharedPreferences("micup_prefs", android.content.Context.MODE_PRIVATE)
+            .edit().putInt("output_device_id", deviceId).apply()
+    }
+
+    // ── Input device (fixes #5 — external sound cards were stuck on the built-in mic) ──
+
+    private val _inputDevices = MutableStateFlow<List<com.micplugin.service.OutputDevice>>(emptyList())
+    val inputDevices: kotlinx.coroutines.flow.StateFlow<List<com.micplugin.service.OutputDevice>> = _inputDevices
+
+    private val _selectedInputDeviceId = MutableStateFlow(-1)
+    val selectedInputDeviceId: kotlinx.coroutines.flow.StateFlow<Int> = _selectedInputDeviceId
+
+    fun loadInputDevices(context: android.content.Context) {
+        _inputDevices.value = SoftwareLoopback.getInputDevices(context)
+        val saved = context.getSharedPreferences("micup_prefs", android.content.Context.MODE_PRIVATE)
+            .getInt("input_device_id", -1)
+        _selectedInputDeviceId.value = saved
+        audioEngine.setInputDevice(saved)
+    }
+
+    fun setInputDevice(context: android.content.Context, deviceId: Int) {
+        _selectedInputDeviceId.value = deviceId
+        audioEngine.setInputDevice(deviceId)
+        context.getSharedPreferences("micup_prefs", android.content.Context.MODE_PRIVATE)
+            .edit().putInt("input_device_id", deviceId).apply()
+    }
+
+}
