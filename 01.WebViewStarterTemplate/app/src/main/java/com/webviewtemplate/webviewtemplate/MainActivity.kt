@@ -32,9 +32,6 @@ import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.webviewtemplate.webviewtemplate.databinding.ActivityMainBinding
 import com.webviewtemplate.webviewtemplate.audio.AudioEngine
-import com.webviewtemplate.webviewtemplate.service.ShizukuManager
-import com.webviewtemplate.webviewtemplate.service.ShizukuState
-import com.webviewtemplate.webviewtemplate.service.VirtualMicService
 import com.webviewtemplate.webviewtemplate.ui.AudioSettings
 import com.webviewtemplate.webviewtemplate.ui.LevelInfo
 import com.webviewtemplate.webviewtemplate.ui.MicSettingsSheet
@@ -57,8 +54,6 @@ class MainActivity : ComponentActivity() {
     private var settingsDialog: ComponentDialog? = null
     private var sheetSettings by mutableStateOf(AudioSettings())
     private var levelInfo by mutableStateOf(LevelInfo())
-    private val shizukuManager = ShizukuManager()
-    private lateinit var virtualMicService: VirtualMicService
     private var nativeStackStarted = false
 
     private val levelPoller = object : Runnable {
@@ -88,27 +83,11 @@ class MainActivity : ComponentActivity() {
         setContentView(binding.root)
         webView = binding.webView
         preferences = getSharedPreferences(preferencesName, MODE_PRIVATE)
-        virtualMicService = VirtualMicService(this, shizukuManager)
         sheetSettings = readSettings()
         if (enableCrashTest) throw RuntimeException("Test crash")
 
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), recordAudioRequestCode)
-        }
-        shizukuManager.init { state ->
-            runOnUiThread {
-                when (state) {
-                    ShizukuState.NEED_GRANT -> shizukuManager.requestPermission()
-                    ShizukuState.READY -> if (
-                        ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
-                        PackageManager.PERMISSION_GRANTED
-                    ) initializeNativeStack()
-                    ShizukuState.UNAVAILABLE -> throw RuntimeException(
-                        "Shizuku is unavailable. Start Shizuku through Wireless debugging or ADB; " +
-                            "this app intentionally has no non-native audio fallback."
-                    )
-                }
-            }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(
@@ -251,24 +230,6 @@ class MainActivity : ComponentActivity() {
         safeEvaluateJavascript(webView, script)
     }
 
-    private fun initializeNativeStack() {
-        if (nativeStackStarted) return
-        shizukuManager.requireReady()
-        try {
-            AudioEngine.shared.start()
-            virtualMicService.activate(AudioEngine.shared)
-            nativeStackStarted = true
-            applyAudioSettings()
-        } catch (t: Throwable) {
-            AudioEngine.shared.stop()
-            throw RuntimeException(
-                "Native audio/Shizuku ALSA loopback initialization failed. " +
-                    "No software audio fallback is available.",
-                t
-            )
-        }
-    }
-
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -277,9 +238,12 @@ class MainActivity : ComponentActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != recordAudioRequestCode) return
         if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
-            throw RuntimeException("RECORD_AUDIO permission is required for the native audio engine.")
+            android.widget.Toast.makeText(
+                this,
+                "Quyền microphone chưa được cấp; WebView vẫn hoạt động bình thường.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
         }
-        if (shizukuManager.state == ShizukuState.READY) initializeNativeStack()
     }
 
     private fun safeEvaluateJavascript(view: WebView, script: String, result: ((String) -> Unit)? = null) {

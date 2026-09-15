@@ -3,8 +3,18 @@ package com.webviewtemplate.webviewtemplate.service
 import android.content.pm.PackageManager
 import android.util.Log
 import rikka.shizuku.Shizuku
+import java.io.IOException
 
 enum class ShizukuState { UNAVAILABLE, NEED_GRANT, READY }
+
+sealed interface ShizukuCommandResult {
+    data class Success(val output: String, val error: String = "", val exitCode: Int = 0) :
+        ShizukuCommandResult
+
+    data class Failed(val message: String, val exitCode: Int = -1) : ShizukuCommandResult
+    object NotReady : ShizukuCommandResult
+    object PermissionDenied : ShizukuCommandResult
+}
 
 class ShizukuManager {
     @Volatile var state: ShizukuState = ShizukuState.UNAVAILABLE
@@ -42,78 +52,93 @@ class ShizukuManager {
             } else {
                 ShizukuState.NEED_GRANT
             }
-        } catch (t: Throwable) {
-            Log.e(TAG, "Unable to inspect Shizuku permission", t)
+        } catch (error: SecurityException) {
+            Log.w(TAG, "Unable to inspect Shizuku permission", error)
             ShizukuState.UNAVAILABLE
         }
         onStateChanged(state)
     }
 
-    fun requestPermission() {
-        if (state != ShizukuState.NEED_GRANT) {
-            throw RuntimeException(
-                "Shizuku permission cannot be requested because Shizuku is not running. " +
-                    "Start Shizuku using Wireless debugging or ADB."
-            )
-        }
-        Shizuku.requestPermission(REQUEST_CODE)
-    }
-
-    fun requireReady() {
-        if (state != ShizukuState.READY) {
-            throw RuntimeException(
-                "Shizuku is not ready (state=$state). Start Shizuku and grant this app API permission."
-            )
+    fun requestPermission(): Boolean {
+        if (!Shizuku.pingBinder() || state != ShizukuState.NEED_GRANT) return false
+        return try {
+            Shizuku.requestPermission(REQUEST_CODE)
+            true
+        } catch (error: SecurityException) {
+            Log.w(TAG, "Unable to request Shizuku permission", error)
+            false
         }
     }
 
-    fun exec(command: String): String {
-        requireReady()
-        // Keep the command path identical to the reference MicUp implementation:
-        // Shizuku permission is the required gate before invoking the device shell.
-        val process = try {
-            Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
-        } catch (t: Throwable) {
-            throw RuntimeException("Shizuku could not execute `$command`.", t)
+    fun exec(command: String): ShizukuCommandResult {
+        if (!Shizuku.pingBinder()) return ShizukuCommandResult.NotReady
+        if (state != ShizukuState.READY) return ShizukuCommandResult.PermissionDenied
+        return try {
+            val newProcess = Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            ).apply { isAccessible = true }
+            val process = newProcess.invoke(
+                null,
+                arrayOf("sh", "-c", command),
+                null,
+                null
+            ) as Process
+            val output = process.inputStream.bufferedReader().readText()
+            val error = process.errorStream.bufferedReader().readText()
+            val exitCode = process.waitFor()
+            if (exitCode == 0) {
+                ShizukuCommandResult.Success(output, error, exitCode)
+            } else {
+                ShizukuCommandResult.Failed(
+                    error.trim().ifEmpty { "Command failed: $command" },
+                    exitCode
+                )
+            }
+        } catch (error: IOException) {
+            ShizukuCommandResult.Failed(error.message ?: "I/O error while executing command")
+        } catch (error: ReflectiveOperationException) {
+            ShizukuCommandResult.Failed(error.message ?: "Unable to create Shizuku process")
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            ShizukuCommandResult.Failed("Command interrupted")
+        } catch (error: SecurityException) {
+            ShizukuCommandResult.PermissionDenied
         }
-        val output = process.inputStream.bufferedReader().readText()
-        val error = process.errorStream.bufferedReader().readText()
-        val exit = process.waitFor()
-        if (exit != 0) {
-            throw RuntimeException(
-                "Shizuku command failed ($exit): `$command`${error.trim().takeIf { it.isNotEmpty() }?.let { ": $it" } ?: ""}"
-            )
-        }
-        return output
     }
 
-    fun requireAlsaLoopback() {
-        val load = exec("modprobe snd-aloop pcm_substreams=2 2>&1 || " +
-            "insmod /system/lib/modules/snd-aloop.ko pcm_substreams=2 2>&1 || true")
+    fun requireAlsaLoopback(): ShizukuCommandResult {
+        val load = exec("modprobe snd-aloop pcm_substreams=2 2>&1")
+        if (load is ShizukuCommandResult.NotReady ||
+            load is ShizukuCommandResult.PermissionDenied
+        ) return load
+
         val cards = exec("cat /proc/asound/cards 2>/dev/null")
-        if (!cards.contains("Loopback", ignoreCase = true)) {
-            throw RuntimeException(
-                "ALSA snd-aloop is unavailable. Module probe output: ${load.trim().take(240)}"
-            )
-        }
-    }
-
-    fun routeToLoopback(sampleRate: Int) {
-        val tinymix = exec("command -v tinymix").trim()
-        if (tinymix.isEmpty()) {
-            throw RuntimeException("Shizuku route failed: tinymix is not installed on this device.")
-        }
-        val result = exec("$tinymix 'Loopback Mixer' 1 2>&1")
-        if (result.contains("error", ignoreCase = true) ||
-            result.contains("invalid", ignoreCase = true)
+        return if (cards is ShizukuCommandResult.Success &&
+            cards.output.contains("Loopback", ignoreCase = true)
         ) {
-            throw RuntimeException("ALSA loopback mixer route failed at ${sampleRate}Hz: ${result.trim()}")
+            cards
+        } else if (cards is ShizukuCommandResult.Success) {
+            ShizukuCommandResult.Failed("Kernel máy không hỗ trợ ALSA loopback")
+        } else {
+            cards
         }
     }
 
-    fun setAppOpsMicDefault(packageName: String) {
-        exec("appops set $packageName RECORD_AUDIO allow")
+    fun routeToLoopback(sampleRate: Int): ShizukuCommandResult {
+        val tinymixResult = exec("command -v tinymix")
+        if (tinymixResult !is ShizukuCommandResult.Success) return tinymixResult
+        val tinymix = tinymixResult.output.trim()
+        if (tinymix.isEmpty()) {
+            return ShizukuCommandResult.Failed("tinymix is not installed on this device.")
+        }
+        return exec("$tinymix 'Loopback Mixer' 1 2>&1")
     }
+
+    fun setAppOpsMicDefault(packageName: String): ShizukuCommandResult =
+        exec("appops set $packageName RECORD_AUDIO allow")
 
     companion object {
         private const val TAG = "WebViewTemplate.Shizuku"

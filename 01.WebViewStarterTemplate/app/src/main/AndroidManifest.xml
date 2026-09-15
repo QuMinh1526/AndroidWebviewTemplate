@@ -29,6 +29,12 @@
         android:theme="@style/Theme.AppCompat" />
 
     <activity
+        android:name=".DiagnosticActivity"
+        android:exported="false"
+        android:label="Shizuku Diagnostic"
+        android:theme="@style/Theme.AppCompat" />
+
+    <activity
         android:name=".MainActivity"
         android:exported="true">
         <intent-filter>
