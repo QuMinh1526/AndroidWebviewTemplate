@@ -45,6 +45,13 @@ public:
         tail_.fetch_add(count, std::memory_order_release);
         return true;
     }
+    void discard(size_t count) {
+        const size_t available = available_read();
+        tail_.fetch_add(std::min(count, available), std::memory_order_release);
+    }
+    void clear() {
+        tail_.store(head_.load(std::memory_order_acquire), std::memory_order_release);
+    }
 private:
     alignas(64) std::array<float, Capacity> buf_{};
     alignas(64) std::atomic<size_t> head_{0};
@@ -101,7 +108,7 @@ struct EffectParams {
     //                false = software loopback tier, zero native output (Kotlin handles monitor)
     std::atomic<bool>  injectionMode{false};
 
-    // Monitoring now handled in Kotlin via JNI callback — param 98 unused
+    // Monitoring and WebView delivery consume independent native PCM queues.
 
     EffectParams() {
         for (auto& g : eqGain) g.store(0.0f, std::memory_order_relaxed);
@@ -165,6 +172,9 @@ public:
     bool start();
     void stop();
     bool isRunning() const { return running_.load(std::memory_order_relaxed); }
+    int32_t pullPcm(float* destination, int32_t maxFrames);
+    int32_t pullMonitorPcm(float* destination, int32_t maxFrames);
+    void clearPcm(); // clear only the WebView queue; monitor has an independent consumer
 
     EffectParams& params() { return params_; }
     int32_t sampleRate()    const { return sampleRate_; }
@@ -228,7 +238,8 @@ private:
 
     // Ring buffer: ~0.5 sec @ 48kHz
     static constexpr size_t kRingSize = 32768;
-    SPSCRingBuffer<kRingSize> ring_;
+    SPSCRingBuffer<kRingSize> webRing_;
+    SPSCRingBuffer<kRingSize> monitorRing_;
 
     // Params (UI writes, audio thread reads)
     EffectParams params_;

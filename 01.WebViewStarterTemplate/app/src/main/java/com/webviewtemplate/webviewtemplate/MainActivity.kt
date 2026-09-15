@@ -30,8 +30,17 @@ import androidx.core.app.ActivityCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.webviewtemplate.webviewtemplate.databinding.ActivityMainBinding
 import com.webviewtemplate.webviewtemplate.audio.AudioEngine
+import com.webviewtemplate.webviewtemplate.audio.NativePcmBridge
+import com.webviewtemplate.webviewtemplate.service.AudioProcessingService
+import com.webviewtemplate.webviewtemplate.service.ShizukuManager
+import com.webviewtemplate.webviewtemplate.service.SoftwareLoopback
+import com.webviewtemplate.webviewtemplate.service.VirtualMicResult
+import com.webviewtemplate.webviewtemplate.service.VirtualMicTier
+import com.webviewtemplate.webviewtemplate.service.VirtualMicService
 import com.webviewtemplate.webviewtemplate.ui.AudioSettings
 import com.webviewtemplate.webviewtemplate.ui.LevelInfo
 import com.webviewtemplate.webviewtemplate.ui.MicSettingsSheet
@@ -55,22 +64,28 @@ class MainActivity : ComponentActivity() {
     private var sheetSettings by mutableStateOf(AudioSettings())
     private var levelInfo by mutableStateOf(LevelInfo())
     private var nativeStackStarted = false
+    private val shizukuManager = ShizukuManager()
+    private lateinit var virtualMicService: VirtualMicService
+    private var documentStartAudioInstalled = false
 
     private val levelPoller = object : Runnable {
         override fun run() {
             if (nativeStackStarted) {
-                AudioEngine.shared.requireHealthy()
-                val levels = AudioEngine.shared.levels
-                levelInfo = levelInfo.copy(
-                    inputDb = levels.inputDb,
-                    outputDb = levels.outputDb,
-                    sampleRate = AudioEngine.shared.sampleRate().toString(),
-                    latency = "%.1f".format(
-                        Locale.US,
-                        AudioEngine.shared.framesPerBurst() * 2000f / AudioEngine.shared.sampleRate()
-                    ),
-                    bufferSize = AudioEngine.shared.framesPerBurst().toString()
-                )
+                try {
+                    val levels = AudioEngine.shared.levels
+                    levelInfo = levelInfo.copy(
+                        inputDb = levels.inputDb,
+                        outputDb = levels.outputDb,
+                        sampleRate = AudioEngine.shared.sampleRate().toString(),
+                        latency = "%.1f".format(
+                            Locale.US,
+                            AudioEngine.shared.framesPerBurst() * 2000f / AudioEngine.shared.sampleRate()
+                        ),
+                        bufferSize = AudioEngine.shared.framesPerBurst().toString()
+                    )
+                } catch (error: Exception) {
+                    Log.w("WebViewApp", "Audio meter unavailable", error)
+                }
             }
             levelHandler.postDelayed(this, 100)
         }
@@ -83,12 +98,17 @@ class MainActivity : ComponentActivity() {
         setContentView(binding.root)
         webView = binding.webView
         preferences = getSharedPreferences(preferencesName, MODE_PRIVATE)
+        virtualMicService = VirtualMicService(applicationContext, shizukuManager)
+        shizukuManager.init { state ->
+            runOnUiThread {
+                if (!isFinishing && !AudioProcessingService.running.get()) {
+                    binding.audioStatus.text = "Audio idle · Shizuku: ${state.name}"
+                }
+            }
+        }
         sheetSettings = readSettings()
         if (enableCrashTest) throw RuntimeException("Test crash")
 
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), recordAudioRequestCode)
-        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(
                 android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
@@ -104,6 +124,8 @@ class MainActivity : ComponentActivity() {
             userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         }
+        webView.addJavascriptInterface(NativePcmBridge(), "NativePcmBridge")
+        installDocumentStartAudioBridge()
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
                 val audio = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }.toTypedArray()
@@ -122,6 +144,7 @@ class MainActivity : ComponentActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                safeEvaluateJavascript(view, "window.__destroyAudioProcessor && window.__destroyAudioProcessor();")
                 binding.pageProgress.progress = 0
                 binding.progressText.text = "0%"
                 binding.pageProgress.visibility = View.VISIBLE
@@ -132,9 +155,11 @@ class MainActivity : ComponentActivity() {
                 binding.pageProgress.visibility = View.GONE
                 binding.progressText.visibility = View.GONE
                 binding.addressBar.setText(view.url ?: url)
-                // Keep WebView as the browser UI. Native Oboe/Shizuku is authoritative;
-                // do not install the legacy JavaScript audio-processing fallback.
+                if (!documentStartAudioInstalled) {
+                    safeEvaluateJavascript(view, loadAsset("audio_processor.js"))
+                }
                 applyAudioSettings()
+                applyNativeRouteToWebView()
             }
 
             override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean {
@@ -161,6 +186,8 @@ class MainActivity : ComponentActivity() {
                 Log.e("MicSettingsCrash", "Lỗi khi mở settings", e)
             }
         }
+        binding.btnAudio.setOnClickListener { toggleAudio() }
+        populateAudioDevices()
         binding.addressBar.setText(defaultUrl)
         loadUrlSmart(defaultUrl)
         levelHandler.post(levelPoller)
@@ -209,6 +236,121 @@ class MainActivity : ComponentActivity() {
         dialog.window?.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
     }
 
+    private fun installDocumentStartAudioBridge() {
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            documentStartAudioInstalled = true
+            WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                loadAsset("audio_processor.js"),
+                setOf("*")
+            )
+        }
+    }
+
+    private fun loadAsset(name: String): String =
+        assets.open(name).bufferedReader().use { it.readText() }
+
+    private fun toggleAudio() {
+        if (AudioProcessingService.running.get()) {
+            AudioProcessingService.stop(this)
+            nativeStackStarted = false
+            binding.btnAudio.text = "Start audio"
+            binding.audioStatus.text = "Audio idle"
+            safeEvaluateJavascript(webView, "window.__setNativeAudioRoute && window.__setNativeAudioRoute(false);")
+            safeEvaluateJavascript(webView, "window.__destroyAudioProcessor && window.__destroyAudioProcessor();")
+            return
+        }
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                recordAudioRequestCode
+            )
+            return
+        }
+        binding.btnAudio.isEnabled = false
+        binding.audioStatus.text = "Starting audio engine…"
+        AudioProcessingService.onEngineStartFailed = { error ->
+            runOnUiThread {
+                binding.btnAudio.isEnabled = true
+                binding.audioStatus.text = "Audio unavailable: ${error.message ?: "unknown error"}"
+            }
+        }
+        AudioProcessingService.onEngineReady = { engine ->
+            runOnUiThread {
+                nativeStackStarted = true
+                engine.apply(sheetSettings)
+                binding.btnAudio.isEnabled = true
+                binding.btnAudio.text = "Stop audio"
+                binding.audioStatus.text = "Active · software monitor"
+                applyNativeRouteToWebView()
+            }
+            virtualMicService.activateAsync(engine) { result ->
+                runOnUiThread {
+                    val status = when (result) {
+                        is VirtualMicResult.Activated ->
+                            "Active · ${result.tier.name.lowercase().replace('_', ' ')}"
+                        is VirtualMicResult.Failed ->
+                            "Active · software monitor (${result.reason})"
+                    }
+                    binding.audioStatus.text = status
+                    applyNativeRouteToWebView()
+                }
+            }
+        }
+        AudioProcessingService.start(this)
+    }
+
+    private fun applyNativeRouteToWebView() {
+        if (!::webView.isInitialized || isFinishing) return
+        val mode = when {
+            !AudioProcessingService.running.get() -> "off"
+            virtualMicService.activeTier != VirtualMicTier.SOFTWARE_LOOPBACK -> "privileged"
+            else -> "software"
+        }
+        safeEvaluateJavascript(
+            webView,
+            "window.__setNativeAudioMode && window.__setNativeAudioMode('$mode');"
+        )
+    }
+
+    private fun populateAudioDevices() {
+        val inputDevices = SoftwareLoopback.getInputDevices(this)
+        val outputDevices = SoftwareLoopback.getOutputDevices(this)
+        binding.inputDeviceSpinner.adapter = android.widget.ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            inputDevices.map { it.name }
+        )
+        binding.outputDeviceSpinner.adapter = android.widget.ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            outputDevices.map { it.name }
+        )
+        val inputId = preferences.getInt("input_device_id", -1)
+        val outputId = preferences.getInt("output_device_id", -1)
+        binding.inputDeviceSpinner.setSelection(inputDevices.indexOfFirst { it.id == inputId }.coerceAtLeast(0))
+        binding.outputDeviceSpinner.setSelection(outputDevices.indexOfFirst { it.id == outputId }.coerceAtLeast(0))
+        binding.inputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val deviceId = inputDevices.getOrNull(position)?.id ?: -1
+                preferences.edit().putInt("input_device_id", deviceId).apply()
+                if (nativeStackStarted && deviceId >= -1) AudioEngine.shared.setInputDevice(deviceId)
+            }
+        })
+        binding.outputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val deviceId = outputDevices.getOrNull(position)?.id ?: -1
+                preferences.edit().putInt("output_device_id", deviceId).apply()
+                if (AudioProcessingService.running.get()) SoftwareLoopback.setOutputDevice(this@MainActivity, deviceId)
+            }
+        })
+    }
+
     private fun applyAudioSettings() {
         val s = sheetSettings
         if (nativeStackStarted) AudioEngine.shared.apply(s)
@@ -237,7 +379,9 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != recordAudioRequestCode) return
-        if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            toggleAudio()
+        } else {
             android.widget.Toast.makeText(
                 this,
                 "Quyền microphone chưa được cấp; WebView vẫn hoạt động bình thường.",
@@ -334,7 +478,9 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         levelHandler.removeCallbacks(levelPoller)
         settingsDialog?.dismiss()
-        if (nativeStackStarted) AudioEngine.shared.stop()
+        AudioProcessingService.onEngineReady = null
+        AudioProcessingService.onEngineStartFailed = null
+        virtualMicService.close()
         super.onDestroy()
     }
 }

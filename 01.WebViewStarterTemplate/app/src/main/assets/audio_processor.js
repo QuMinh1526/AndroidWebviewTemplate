@@ -18,6 +18,58 @@
   var inputAnalyser = null, outputAnalyser = null, audioContext = null;
   var compressor = null, filters = [], finalGain = null, gateNode = null, pitchNode = null;
   var rawPath = null, processedPath = null, outputSelector = null;
+  var nativeMode = "off";
+  var nativeNode = null, nativePollTimer = null, nativeStream = null, nativeStreamPromise = null;
+  try {
+    if (window.NativePcmBridge && window.NativePcmBridge.mode) {
+      nativeMode = window.NativePcmBridge.mode();
+    }
+  } catch (_) {}
+
+  function destroyNativeStream() {
+    if (nativePollTimer) {
+      clearInterval(nativePollTimer);
+      nativePollTimer = null;
+    }
+    if (nativeNode) {
+      try { nativeNode.disconnect(); } catch (_) {}
+      nativeNode = null;
+    }
+    if (nativeStream) {
+      nativeStream.getTracks().forEach(function (track) { try { track.stop(); } catch (_) {} });
+      nativeStream = null;
+    }
+    nativeStreamPromise = null;
+  }
+
+  window.__destroyAudioProcessor = function () {
+    destroyNativeStream();
+    if (audioContext) {
+      try { audioContext.close(); } catch (_) {}
+    }
+    audioContext = null;
+    inputAnalyser = outputAnalyser = null;
+    rawPath = processedPath = outputSelector = null;
+    gainNodes = [];
+  };
+
+  window.__setNativeAudioMode = function (mode) {
+    var next = mode === "software" || mode === "privileged" ? mode : "off";
+    if (next === "off" && nativeMode !== "off") {
+      destroyNativeStream();
+      if (audioContext) {
+        try { audioContext.close(); } catch (_) {}
+        audioContext = null;
+      }
+    }
+    nativeMode = next;
+  };
+
+  // A privileged Shizuku/root route feeds the processed native stream back through Android's
+  // microphone path. In that mode the WebView must not process the stream a second time.
+  window.__setNativeAudioRoute = function (enabled) {
+    window.__setNativeAudioMode(enabled ? "privileged" : "off");
+  };
 
   function setEnabled(v) {
     settings.enabled = !!v;
@@ -251,6 +303,106 @@
     });
   }
 
+  function decodeFloat32(base64) {
+    if (!base64) return new Float32Array(0);
+    var binary = atob(base64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Float32Array(bytes.buffer);
+  }
+
+  function createNativePcmStream() {
+    var AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass || !audioContext.audioWorklet || !window.AudioWorkletNode ||
+        !window.NativePcmBridge ||
+        !window.NativePcmBridge.isRunning()) {
+      return Promise.reject(new Error("native PCM bridge is not running"));
+    }
+    audioContext = new AudioContextClass();
+    var sourceCode = [
+      "class NativePcmProcessor extends AudioWorkletProcessor {",
+      "constructor() {",
+      " super(); this.capacity=32768; this.buffer=new Float32Array(this.capacity);",
+      " this.read=0; this.write=0; this.available=0; this.frac=0; this.inputRate=sampleRate;",
+      " this.port.onmessage=e=>{",
+      "  if(e.data.type==='format'){this.inputRate=e.data.sampleRate||sampleRate;return;}",
+      "  var a=e.data.samples; if(!a)return;",
+      "  var x=new Float32Array(a);",
+      "  for(var i=0;i<x.length;i++){",
+      "   if(this.available>=this.capacity){this.read=(this.read+1)%this.capacity;this.available--;}",
+      "   this.buffer[this.write]=x[i];this.write=(this.write+1)%this.capacity;this.available++;",
+      "  }",
+      " };",
+      "}",
+      "process(inputs,outputs){",
+      " var out=outputs[0]; if(!out||!out.length)return true; var ch=out[0];",
+      " var step=this.inputRate/sampleRate;",
+      " for(var i=0;i<ch.length;i++){",
+      "  if(this.available<2){ch[i]=0;continue;}",
+      "  var p=Math.floor(this.frac), a=this.buffer[(this.read+p)%this.capacity];",
+      "  var b=this.buffer[(this.read+p+1)%this.capacity]; ch[i]=a+(b-a)*(this.frac-p);",
+      "  this.frac+=step; var consume=Math.floor(this.frac); this.frac-=consume;",
+      "  if(consume>0){var n=Math.min(consume,this.available-1);this.read=(this.read+n)%this.capacity;this.available-=n;}",
+      " }",
+      " for(var c=1;c<out.length;c++)out[c].set(ch); return true;",
+      "}}",
+      "registerProcessor('native-pcm-source',NativePcmProcessor);"
+    ].join("\n");
+    var url = URL.createObjectURL(new Blob([sourceCode], {type: "application/javascript"}));
+    return audioContext.audioWorklet.addModule(url).then(function () {
+      URL.revokeObjectURL(url);
+      nativeNode = new AudioWorkletNode(audioContext, "native-pcm-source", {
+        numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1]
+      });
+      var format = JSON.parse(window.NativePcmBridge.format());
+      nativeNode.port.postMessage({type: "format", sampleRate: format.sampleRate || audioContext.sampleRate});
+      window.NativePcmBridge.clear();
+      var analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      inputAnalyser = analyser;
+      nativeNode.connect(analyser);
+      var destination = audioContext.createMediaStreamDestination();
+      analyser.connect(destination);
+      nativeStream = destination.stream;
+      nativePollTimer = setInterval(function () {
+        try {
+          if (!window.NativePcmBridge.isRunning()) return;
+          var packet = JSON.parse(window.NativePcmBridge.pullPcm(1024));
+          if (packet.frames > 0 && packet.data) {
+            var samples = decodeFloat32(packet.data);
+            nativeNode.port.postMessage({samples: samples.buffer}, [samples.buffer]);
+          }
+        } catch (error) {
+          console.log("[audio_processor] native PCM pull failed", error);
+        }
+      }, 10);
+      return audioContext.resume().catch(function () {}).then(function () {
+        return nativeStream;
+      });
+    }).catch(function (error) {
+      URL.revokeObjectURL(url);
+      destroyNativeStream();
+      if (audioContext) { try { audioContext.close(); } catch (_) {} }
+      audioContext = null;
+      throw error;
+    });
+  }
+
+  function nativeGetUserMedia(constraints) {
+    if (!nativeStreamPromise) {
+      nativeStreamPromise = createNativePcmStream();
+    }
+    var videoPromise = constraints.video
+      ? originalGetUserMedia(Object.assign({}, constraints, {audio: false}))
+      : Promise.resolve(new MediaStream());
+    return Promise.all([nativeStreamPromise, videoPromise]).then(function (streams) {
+      var result = new MediaStream();
+      streams[0].getAudioTracks().forEach(function (track) { result.addTrack(track.clone()); });
+      streams[1].getVideoTracks().forEach(function (track) { result.addTrack(track); });
+      return result;
+    });
+  }
+
   if (originalGetUserMedia) {
     navigator.mediaDevices.getUserMedia = function (constraints) {
       if (!constraints || !constraints.audio) return originalGetUserMedia(constraints);
@@ -262,6 +414,13 @@
           autoGainControl: false
         })
       });
+      if (nativeMode === "software") {
+        return nativeGetUserMedia(constraints).catch(function (error) {
+          console.log("[audio_processor] native PCM unavailable; using browser mic", error);
+          return originalGetUserMedia(requested).then(buildPipeline);
+        });
+      }
+      if (nativeMode === "privileged") return originalGetUserMedia(requested);
       return originalGetUserMedia(requested).then(buildPipeline);
     };
   }

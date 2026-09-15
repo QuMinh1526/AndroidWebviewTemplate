@@ -24,7 +24,7 @@ class AudioEngine private constructor() {
     fun start() {
         if (running) return
         oboe.start()
-        oboe.setInjectionMode(true)
+        oboe.setInjectionMode(false)
         running = true
         meterTask = meterExecutor.scheduleAtFixedRate({
             val raw = oboe.getLevels()
@@ -72,8 +72,19 @@ class AudioEngine private constructor() {
         oboe.setParam(5, 1, if (settings.gainEnabled) 1f else 0f)
     }
 
+    fun setInputDevice(deviceId: Int) {
+        if (running) oboe.setInputDevice(deviceId)
+    }
+
+    fun setNativeInjection(enabled: Boolean) {
+        if (running) oboe.setInjectionMode(enabled)
+    }
+
     fun sampleRate(): Int = oboe.getSampleRate()
     fun framesPerBurst(): Int = oboe.getFramesPerBurst()
+    fun pullPcm(maxFrames: Int): FloatArray = oboe.pullPcm(maxFrames)
+    fun pullMonitorPcm(maxFrames: Int): FloatArray = oboe.pullMonitorPcm(maxFrames)
+    fun clearPcm() = oboe.clearPcm()
     fun requireHealthy() {
         if (!running || !oboe.isRunning()) {
             throw RuntimeException(

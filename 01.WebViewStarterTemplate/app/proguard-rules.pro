@@ -19,3 +19,7 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Native entry points are looked up by the fully-qualified JNI method name.
+-keep class com.webviewtemplate.webviewtemplate.audio.OboeEngine { *; }
+-keep class com.webviewtemplate.webviewtemplate.audio.NativePcmBridge { *; }

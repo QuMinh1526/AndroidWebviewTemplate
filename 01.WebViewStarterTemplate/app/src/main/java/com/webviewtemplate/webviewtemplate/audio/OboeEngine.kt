@@ -43,7 +43,15 @@ class OboeEngine {
         nativeSetInjectionMode(handle, enabled)
     }
 
+    fun setInputDevice(deviceId: Int) {
+        check(handle != 0L) { "Native AudioEngine is not available" }
+        nativeSetInputDevice(handle, deviceId)
+    }
+
     fun getLevels(): FloatArray = nativeGetLevels(handle)
+    fun pullPcm(maxFrames: Int): FloatArray = nativePullPcm(handle, maxFrames)
+    fun pullMonitorPcm(maxFrames: Int): FloatArray = nativePullMonitorPcm(handle, maxFrames)
+    fun clearPcm() = nativeClearPcm(handle)
     fun isRunning(): Boolean = nativeIsRunning(handle)
     fun getSampleRate(): Int = nativeGetSampleRate(handle)
     fun getFramesPerBurst(): Int = nativeGetFramesPerBurst(handle)
@@ -63,6 +71,11 @@ class OboeEngine {
     private external fun nativeGetLevels(handle: Long): FloatArray
     private external fun nativeIsRunning(handle: Long): Boolean
     private external fun nativeSetInjectionMode(handle: Long, enabled: Boolean)
+    private external fun nativeSetInputDevice(handle: Long, deviceId: Int)
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetFramesPerBurst(handle: Long): Int
+    private external fun nativeGetInputSessionId(handle: Long): Int
+    private external fun nativePullPcm(handle: Long, maxFrames: Int): FloatArray
+    private external fun nativePullMonitorPcm(handle: Long, maxFrames: Int): FloatArray
+    private external fun nativeClearPcm(handle: Long)
 }
