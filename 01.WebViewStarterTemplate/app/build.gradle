@@ -7,13 +7,20 @@ plugins {
     android {
         namespace 'com.webviewtemplate.webviewtemplate'
         compileSdk 34
+        ndkVersion '26.3.11579264'
 
         defaultConfig {
             applicationId "com.webviewtemplate.webviewtemplate"
             minSdk 24
             targetSdk 34
-            versionCode 1
-            versionName "1.0.0"
+            versionCode 5
+            versionName "1.5.0"
+            externalNativeBuild {
+                cmake {
+                    cppFlags '-std=c++17', '-O2', '-ffast-math', '-DANDROID'
+                    arguments '-DANDROID_STL=c++_shared'
+                }
+            }
         }
 
         buildTypes {
@@ -30,14 +37,23 @@ plugins {
         }
 
         compileOptions {
-            sourceCompatibility JavaVersion.VERSION_11
-            targetCompatibility JavaVersion.VERSION_11
+            sourceCompatibility JavaVersion.VERSION_17
+            targetCompatibility JavaVersion.VERSION_17
         }
         kotlinOptions {
-            jvmTarget = JavaVersion.VERSION_11
+            jvmTarget = '17'
         }
         composeOptions {
             kotlinCompilerExtensionVersion '1.4.6'
+        }
+        externalNativeBuild {
+            cmake {
+                path file('src/main/cpp/CMakeLists.txt')
+                version '3.22.1'
+            }
+        }
+        buildFeatures {
+            prefab true
         }
     }
 
@@ -52,4 +68,7 @@ plugins {
         implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
         implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
         implementation 'androidx.webkit:webkit:1.9.0'
+        implementation 'com.google.oboe:oboe:1.8.1'
+        implementation 'dev.rikka.shizuku:api:13.1.5'
+        implementation 'dev.rikka.shizuku:provider:13.1.5'
     }

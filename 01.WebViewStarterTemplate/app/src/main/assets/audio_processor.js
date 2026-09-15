@@ -8,6 +8,7 @@
     eqEnabled: true, eq: Array(10).fill(0),
     compressorEnabled: true, compThreshold: -24, compRatio: 4, compAttack: 10, compRelease: 180, compMakeup: 0,
     reverbEnabled: false, reverbMix: .2, reverbRoom: .5, reverbDamping: .5,
+    pitchEnabled: false, pitchSemitones: 0,
     echoEnabled: false, echoAmount: 0, gainEnabled: true, gain: 1
   };
   var settings = window.__audioSettings;
@@ -15,9 +16,18 @@
     ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices) : null;
   var gainNodes = [];
   var inputAnalyser = null, outputAnalyser = null, audioContext = null;
-  var compressor = null, filters = [], finalGain = null, gateNode = null;
+  var compressor = null, filters = [], finalGain = null, gateNode = null, pitchNode = null;
+  var rawPath = null, processedPath = null, outputSelector = null;
 
-  function setEnabled(v) { settings.enabled = !!v; }
+  function setEnabled(v) {
+    settings.enabled = !!v;
+    if (!rawPath || !processedPath || !outputSelector || !audioContext) return;
+    var now = audioContext.currentTime;
+    rawPath.gain.cancelScheduledValues(now);
+    processedPath.gain.cancelScheduledValues(now);
+    rawPath.gain.setTargetAtTime(settings.enabled ? 0 : 1, now, .01);
+    processedPath.gain.setTargetAtTime(settings.enabled ? 1 : 0, now, .01);
+  }
   function setNoiseGate(enabled, threshold, attack, release) {
     settings.gateEnabled = !!enabled; settings.gateThreshold = Number(threshold);
     settings.gateAttack = Number(attack); settings.gateRelease = Number(release);
@@ -43,6 +53,13 @@
     settings.reverbEnabled = !!enabled; settings.reverbMix = Number(mix);
     settings.reverbRoom = Number(room); settings.reverbDamping = Number(damping);
   }
+  function setPitch(enabled, semitones) {
+    settings.pitchEnabled = !!enabled;
+    settings.pitchSemitones = Number(semitones);
+    if (pitchNode && pitchNode.port) {
+      pitchNode.port.postMessage({enabled: settings.pitchEnabled, semitones: settings.pitchSemitones});
+    }
+  }
   function setEcho(enabled, amount) { settings.echoEnabled = !!enabled; settings.echoAmount = Number(amount); }
   function setGain(enabled, value) {
     settings.gainEnabled = !!enabled; settings.gain = Number(value);
@@ -54,6 +71,7 @@
   window.__setEq = setEq;
   window.__setCompressor = setCompressor;
   window.__setReverb = setReverb;
+  window.__setPitch = setPitch;
   window.__setEcho = setEcho;
   window.__setGain = setGain;
   window.__setMicGain = function (value) { setGain(true, value); };
@@ -111,10 +129,20 @@
       return ctx.audioWorklet.addModule(url).then(function () {
         URL.revokeObjectURL(url);
         gateNode = new AudioWorkletNode(ctx, "mic-noise-gate");
+        console.log("[audio_processor] Noise gate: AudioWorklet active");
         gateNode.port.postMessage({enabled: settings.gateEnabled, threshold: settings.gateThreshold});
         return gateNode;
+      }).catch(function (error) {
+        URL.revokeObjectURL(url);
+        console.log("[audio_processor] Noise gate: AudioWorklet failed, using ScriptProcessor", error);
+        return createScriptProcessorGate(ctx);
       });
     }
+    console.log("[audio_processor] Noise gate: AudioWorklet unavailable, using ScriptProcessor");
+    return createScriptProcessorGate(ctx);
+  }
+
+  function createScriptProcessorGate(ctx) {
     var processor = ctx.createScriptProcessor(1024, 1, 1);
     processor.onaudioprocess = function (event) {
       var input = event.inputBuffer.getChannelData(0), output = event.outputBuffer.getChannelData(0);
@@ -127,11 +155,42 @@
     return Promise.resolve(processor);
   }
 
+  // Lightweight granular demo: two crossfaded taps in an AudioWorklet. It is
+  // intentionally simpler than a native phase-vocoder and may have grain artifacts.
+  function createPitchNode(ctx) {
+    if (!ctx.audioWorklet || !window.AudioWorkletNode) return Promise.resolve(ctx.createGain());
+    var source = [
+      "class PitchShifterProcessor extends AudioWorkletProcessor {",
+      "constructor() { super(); this.enabled=false; this.ratio=1; this.size=sampleRate*.07; this.buffer=[]; this.write=0; this.phase=0; this.port.onmessage=e=>{this.enabled=!!e.data.enabled; this.ratio=Math.pow(2,(e.data.semitones||0)/12);}; }",
+      "process(inputs, outputs) {",
+      "  var input=inputs[0], output=outputs[0]; if(!input.length||!output.length)return true;",
+      "  for(var c=0;c<output.length;c++){ if(!this.buffer[c])this.buffer[c]=new Float32Array(Math.ceil(this.size)+2); var b=this.buffer[c], x=input[c]||input[0], y=output[c];",
+      "    for(var i=0;i<y.length;i++){ var v=x?x[i]||0:0; b[this.write]=v; var p=this.phase, a=(this.write-Math.floor((p+.5)*this.size)+b.length)%b.length, q=(this.write-Math.floor((p)*this.size)+b.length)%b.length; var w=p<.5?p*2:2-p*2; y[i]=this.enabled?(b[a]*(1-w)+b[q]*w):v; this.write=(this.write+1)%b.length; this.phase+=this.ratio/this.size; if(this.phase>=1)this.phase-=1; } } return true;",
+      "}}",
+      "registerProcessor('pitch-shifter', PitchShifterProcessor);"
+    ].join("\n");
+    var url = URL.createObjectURL(new Blob([source], {type: "application/javascript"}));
+    return ctx.audioWorklet.addModule(url).then(function () {
+      URL.revokeObjectURL(url);
+      pitchNode = new AudioWorkletNode(ctx, "pitch-shifter");
+      pitchNode.port.postMessage({enabled: settings.pitchEnabled, semitones: settings.pitchSemitones});
+      console.log("[audio_processor] Pitch shifter: AudioWorklet active");
+      return pitchNode;
+    }).catch(function (error) {
+      URL.revokeObjectURL(url);
+      console.log("[audio_processor] Pitch shifter unavailable, bypassing", error);
+      return ctx.createGain();
+    });
+  }
+
   function buildPipeline(rawStream) {
     var AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass || !rawStream.getAudioTracks().length) return rawStream;
+    if (!AudioContextClass || !rawStream.getAudioTracks().length) return Promise.resolve(rawStream);
     audioContext = new AudioContextClass();
     var source = audioContext.createMediaStreamSource(rawStream);
+    rawPath = audioContext.createGain();
+    rawPath.gain.value = settings.enabled ? 0 : 1;
+    source.connect(rawPath);
     inputAnalyser = audioContext.createAnalyser();
     inputAnalyser.fftSize = 1024;
     source.connect(inputAnalyser);
@@ -160,6 +219,10 @@
     var reverbMix = audioContext.createGain(); dry.connect(reverbMix); reverbWet.connect(reverbMix);
     cursor = reverbMix;
 
+    return createPitchNode(audioContext).then(function (pitch) {
+    pitchNode = pitch;
+    cursor.connect(pitch);
+    cursor = pitch;
     var delay = audioContext.createDelay(1); delay.delayTime.value = .3;
     var feedback = audioContext.createGain(); feedback.gain.value = settings.echoEnabled ? settings.echoAmount / 100 * .7 : 0;
     var echoWet = audioContext.createGain(); echoWet.gain.value = settings.echoEnabled ? settings.echoAmount / 100 : 0;
@@ -170,19 +233,27 @@
     finalGain.gain.value = settings.gainEnabled ? settings.gain : 1;
     cursor.connect(finalGain);
     outputAnalyser = audioContext.createAnalyser(); outputAnalyser.fftSize = 1024;
+    processedPath = audioContext.createGain();
+    processedPath.gain.value = settings.enabled ? 1 : 0;
     finalGain.connect(outputAnalyser);
-    var destination = audioContext.createMediaStreamDestination(); outputAnalyser.connect(destination);
+    outputAnalyser.connect(processedPath);
+    outputSelector = audioContext.createGain();
+    rawPath.connect(outputSelector);
+    processedPath.connect(outputSelector);
+    var destination = audioContext.createMediaStreamDestination();
+    outputSelector.connect(destination);
     gainNodes.push(finalGain);
     var processed = new MediaStream();
     destination.stream.getAudioTracks().forEach(function (track) { processed.addTrack(track); });
     rawStream.getVideoTracks().forEach(function (track) { processed.addTrack(track); });
       return processed;
+      });
     });
   }
 
   if (originalGetUserMedia) {
     navigator.mediaDevices.getUserMedia = function (constraints) {
-      if (!constraints || !constraints.audio || !settings.enabled) return originalGetUserMedia(constraints);
+      if (!constraints || !constraints.audio) return originalGetUserMedia(constraints);
       var audio = constraints.audio === true ? {} : constraints.audio;
       var requested = Object.assign({}, constraints, {
         audio: Object.assign({}, audio, {
