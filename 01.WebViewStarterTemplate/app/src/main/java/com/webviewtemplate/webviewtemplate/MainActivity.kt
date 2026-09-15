@@ -2,8 +2,6 @@ package com.webviewtemplate.webviewtemplate
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Activity
-import android.app.Dialog
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.Intent
@@ -22,12 +20,16 @@ import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.activity.compose.setContent
+import androidx.activity.ComponentActivity
+import androidx.activity.ComponentDialog
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.ActivityCompat
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.webviewtemplate.webviewtemplate.databinding.ActivityMainBinding
 import com.webviewtemplate.webviewtemplate.ui.AudioSettings
 import com.webviewtemplate.webviewtemplate.ui.MicSettingsSheet
@@ -37,7 +39,7 @@ import org.json.JSONTokener
 import java.net.URLEncoder
 import java.util.Locale
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     // Set true temporarily to verify CrashActivity, then rebuild and launch the app.
     private val enableCrashTest = false
     private val recordAudioRequestCode = 1001
@@ -47,7 +49,7 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var preferences: SharedPreferences
     private val levelHandler = Handler(Looper.getMainLooper())
-    private var settingsDialog: Dialog? = null
+    private var settingsDialog: ComponentDialog? = null
     private var sheetSettings by mutableStateOf(AudioSettings())
 
     private val levelPoller = object : Runnable {
@@ -165,9 +167,12 @@ class MainActivity : Activity() {
 
     private fun showMicSettings() {
         if (settingsDialog?.isShowing == true) return
-        val dialog = Dialog(this)
+        val dialog = ComponentDialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        dialog.setContentView(ComposeView(this).apply {
+        val composeView = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(dialog)
+            setViewTreeViewModelStoreOwner(this@MainActivity)
+            setViewTreeSavedStateRegistryOwner(dialog)
             setContent {
                 StudioTheme {
                     MicSettingsSheet(
@@ -185,7 +190,8 @@ class MainActivity : Activity() {
                     )
                 }
             }
-        })
+        }
+        dialog.setContentView(composeView)
         dialog.setOnShowListener {
             dialog.window?.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
         }
