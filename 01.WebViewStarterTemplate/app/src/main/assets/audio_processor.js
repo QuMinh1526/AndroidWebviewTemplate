@@ -1,6 +1,12 @@
 (function () {
   "use strict";
 
+  window.__audioSettings = window.__audioSettings || {
+    enabled: true,
+    echoCancellation: true,
+    noiseSuppression: true
+  };
+
   if (window.__micProcessorInstalled) {
     return;
   }
@@ -12,6 +18,19 @@
 
   var originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
   var currentGain = 1.0;
+
+  window.__setAudioProcessingEnabled = function (value) {
+    window.__audioSettings.enabled = Boolean(value);
+  };
+
+  // These constraints are used on the next getUserMedia call, not on active streams.
+  window.__setEchoCancellation = function (value) {
+    window.__audioSettings.echoCancellation = Boolean(value);
+  };
+
+  window.__setNoiseSuppression = function (value) {
+    window.__audioSettings.noiseSuppression = Boolean(value);
+  };
 
   window.__setMicGain = function (value) {
     var gain = Number(value);
@@ -29,15 +48,15 @@
   window.__micGainNodes = [];
 
   navigator.mediaDevices.getUserMedia = function (constraints) {
-    if (!constraints || !constraints.audio) {
+    if (!constraints || !constraints.audio || !window.__audioSettings.enabled) {
       return originalGetUserMedia(constraints);
     }
 
     var audioConstraints = constraints.audio === true ? {} : constraints.audio;
     var processedConstraints = Object.assign({}, constraints, {
       audio: Object.assign({}, audioConstraints, {
-        echoCancellation: true,
-        noiseSuppression: true,
+        echoCancellation: window.__audioSettings.echoCancellation,
+        noiseSuppression: window.__audioSettings.noiseSuppression,
         autoGainControl: false
       })
     });
