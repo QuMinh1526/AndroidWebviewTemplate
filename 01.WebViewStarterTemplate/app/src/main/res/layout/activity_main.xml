@@ -33,6 +33,14 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Settings" />
+
+        <Button
+            android:id="@+id/btn_desktop_site"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:text="Desktop: OFF"
+            android:textSize="11sp" />
     </LinearLayout>
 
     <LinearLayout

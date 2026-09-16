@@ -91,6 +91,8 @@ class MainActivity : ComponentActivity() {
     private var popupDialog: Dialog? = null
     private var fullscreenView: View? = null
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
+    private var desktopMode = false
+    private lateinit var mobileUserAgent: String
 
     private val levelPoller = object : Runnable {
         override fun run() {
@@ -122,6 +124,8 @@ class MainActivity : ComponentActivity() {
         setContentView(binding.root)
         webView = binding.webView
         preferences = getSharedPreferences(preferencesName, MODE_PRIVATE)
+        desktopMode = preferences.getBoolean("desktop_site", false)
+        mobileUserAgent = WebSettings.getDefaultUserAgent(this)
         virtualMicService = VirtualMicService(applicationContext, shizukuManager)
         shizukuManager.init { state ->
             runOnUiThread {
@@ -164,6 +168,8 @@ class MainActivity : ComponentActivity() {
                 Log.e("MicSettingsCrash", "Lỗi khi mở settings", e)
             }
         }
+        binding.btnDesktopSite.setOnClickListener { setDesktopMode(!desktopMode, reload = true) }
+        updateDesktopModeUi()
         binding.btnAudio.setOnClickListener { toggleAudio() }
         binding.btnAudioPanelToggle.setOnClickListener {
             val expanded = binding.audioControls.visibility != View.VISIBLE
@@ -206,16 +212,79 @@ class MainActivity : ComponentActivity() {
             mediaPlaybackRequiresUserGesture = false
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(true)
+            setSupportZoom(true)
+            builtInZoomControls = true
+            displayZoomControls = false
+            setUseWideViewPort(true)
+            loadWithOverviewMode = false
+            textZoom = 100
+            layoutAlgorithm = if (desktopMode) {
+                WebSettings.LayoutAlgorithm.NORMAL
+            } else {
+                WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
+            }
+            userAgentString = userAgentForMode()
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
         }
+        view.setInitialScale(0)
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 setAcceptThirdPartyCookies(view, true)
             }
         }
+    }
+
+    private fun userAgentForMode(): String {
+        if (!desktopMode) return mobileUserAgent
+        // Keep the exact Chromium/WebView Chrome version; only change the platform
+        // tokens that select the server's desktop representation.
+        val chromeToken = Regex("Chrome/[^\\s]+")
+            .find(mobileUserAgent)?.value ?: "Chrome/" + Build.VERSION.RELEASE
+        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) $chromeToken Safari/537.36"
+    }
+
+    private fun setDesktopMode(enabled: Boolean, reload: Boolean) {
+        if (desktopMode == enabled) return
+        desktopMode = enabled
+        preferences.edit().putBoolean("desktop_site", enabled).apply()
+        webView.settings.apply {
+            userAgentString = userAgentForMode()
+            setUseWideViewPort(true)
+            loadWithOverviewMode = false
+            layoutAlgorithm = if (enabled) {
+                WebSettings.LayoutAlgorithm.NORMAL
+            } else {
+                WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
+            }
+        }
+        webView.setInitialScale(0)
+        popupWebView?.let { popup ->
+            popup.settings.userAgentString = userAgentForMode()
+            popup.settings.setUseWideViewPort(true)
+            popup.settings.loadWithOverviewMode = false
+            popup.setInitialScale(0)
+            popup.settings.layoutAlgorithm = if (enabled) {
+                WebSettings.LayoutAlgorithm.NORMAL
+            } else {
+                WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
+            }
+            if (reload && popup.url != null) popup.reload()
+        }
+        updateDesktopModeUi()
+        if (reload && webView.url != null) {
+            // UA and CSS media queries are evaluated during navigation; reload only
+            // the current document, preserving cookies and Chromium HTTP cache.
+            webView.reload()
+        }
+    }
+
+    private fun updateDesktopModeUi() {
+        binding.btnDesktopSite.text = if (desktopMode) "Desktop: ON" else "Desktop: OFF"
+        binding.btnDesktopSite.isSelected = desktopMode
     }
 
     private fun createWebChromeClient(): WebChromeClient = object : WebChromeClient() {
