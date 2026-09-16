@@ -61,7 +61,7 @@ private:
 // ─── Atomic parameter block (UI→Audio thread) ────────────────────────────────
 struct EffectParams {
     // NoiseGate
-    std::atomic<float> gateThresholdDb{-50.0f};
+    std::atomic<float> gateThresholdDb{-45.0f};
     std::atomic<float> gateAttackMs{5.0f};
     std::atomic<float> gateReleaseMs{150.0f};
     std::atomic<bool>  gateEnabled{true};
@@ -89,8 +89,8 @@ struct EffectParams {
     std::atomic<bool>  pitchEnabled{false};
 
     // Gain
-    std::atomic<float> gain{0.0f}; // UI range 0..10000
-    std::atomic<bool>  gainEnabled{false};
+    std::atomic<float> gain{1.0f}; // linear multiplier, UI range 0..kMaxGainMultiplier (unity = 1.0)
+    std::atomic<bool>  gainEnabled{true};
 
     // Echo
     std::atomic<float> echo{0.0f}; // UI range 0..100
@@ -292,9 +292,10 @@ private:
     static constexpr int kMaxEchoDelaySamples = 24000;
     std::array<float, kMaxEchoDelaySamples> echoBuffer_{};
     int echoWritePos_ = 0;
+    float echoFilterState_ = 0.0f;
 
     // ─ Gain state ─
-    static constexpr float kMaxGainMultiplier = 10.0f;
+    static constexpr float kMaxGainMultiplier = 5.0f;
 };
 
 } // namespace micplugin

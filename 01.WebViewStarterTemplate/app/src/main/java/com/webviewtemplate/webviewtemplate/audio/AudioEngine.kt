@@ -72,6 +72,12 @@ class AudioEngine private constructor() {
         oboe.setParam(5, 1, if (settings.gainEnabled) 1f else 0f)
     }
 
+    /** The only web-facing control path for native DSP parameters. */
+    fun setParam(effectId: Int, paramId: Int, value: Float) {
+        check(running) { "Native audio engine is not running" }
+        oboe.setParam(effectId, paramId, value)
+    }
+
     fun setInputDevice(deviceId: Int) {
         if (running) oboe.setInputDevice(deviceId)
     }

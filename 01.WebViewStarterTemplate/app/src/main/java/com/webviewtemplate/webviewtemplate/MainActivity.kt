@@ -454,22 +454,6 @@ class MainActivity : ComponentActivity() {
     private fun applyAudioSettings() {
         val s = sheetSettings
         if (nativeStackStarted) AudioEngine.shared.apply(s)
-        if (!::webView.isInitialized || isFinishing) return
-        val eq = s.eq.joinToString(",") { it.toString() }
-        val script = """
-            (function(){
-              if (!window.__setGain) return;
-              window.__setAudioProcessingEnabled(${s.enabled});
-              window.__setNoiseGate(${s.gateEnabled},${s.gateThreshold},${s.gateAttack},${s.gateRelease});
-              window.__setEq(${s.eqEnabled},[$eq]);
-              window.__setCompressor(${s.compressorEnabled},${s.compThreshold},${s.compRatio},${s.compAttack},${s.compRelease},${s.compMakeup});
-              window.__setReverb(${s.reverbEnabled},${s.reverbMix},${s.reverbRoom},${s.reverbDamping});
-              window.__setPitch(${s.pitchEnabled},${s.pitchSemitones});
-              window.__setEcho(${s.echoEnabled},${s.echoAmount});
-              window.__setGain(${s.gainEnabled},${s.gain});
-            })();
-        """.trimIndent()
-        safeEvaluateJavascript(webView, script)
     }
 
     override fun onRequestPermissionsResult(

@@ -33,6 +33,10 @@ class OboeEngine {
         if (handle != 0L) nativeStop(handle)
     }
 
+    /**
+     * Gain is effect 5 / parameter 0 and uses a linear multiplier from 0f to 5f
+     * (1f is unity), matching the native settings UI.
+     */
     fun setParam(effectId: Int, paramId: Int, value: Float) {
         check(handle != 0L) { "Native AudioEngine is not available" }
         nativeSetParam(handle, effectId, paramId, value)

@@ -11,6 +11,12 @@ import java.nio.ByteOrder
  * native queue; it never opens or owns an AudioRecord.
  */
 class NativePcmBridge {
+    /** Sets a native DSP parameter; JavaScript never creates DSP AudioNodes. */
+    @JavascriptInterface
+    fun setParam(effectId: Int, paramId: Int, value: Float) {
+        runCatching { AudioEngine.shared.setParam(effectId, paramId, value) }
+    }
+
     @JavascriptInterface
     fun mode(): String = routeMode
 

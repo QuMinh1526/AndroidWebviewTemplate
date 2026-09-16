@@ -78,6 +78,9 @@ bool AudioEngine::start() {
     pitchLaunchPhase_ = 0;
     pitchSourceCursor_ = 0.0f;
     pitchPrimed_ = false;
+    echoWritePos_ = 0;
+    echoFilterState_ = 0.0f;
+    echoBuffer_.fill(0.0f);
     std::fill(pitchIn_, pitchIn_ + sizeof(pitchIn_) / sizeof(float), 0.0f);
     std::fill(pitchGrainAge_, pitchGrainAge_ + kGrainCount, kGrainSize);
     if (!openStreams()) return false;
@@ -477,8 +480,8 @@ void AudioEngine::dsp_pitchShift(float* buf, int32_t frames) {
 void AudioEngine::dsp_echo(float* buf, int32_t frames) {
     const float intensity = std::clamp(
         params_.echo.load(std::memory_order_relaxed) / 100.0f, 0.0f, 1.0f);
-    const float feedback = intensity * 0.7f;
-    const float wet = intensity * 0.5f;
+    const float feedback = intensity * 0.55f;
+    const float wet = intensity * 0.35f;
     const int delaySamples = std::clamp(
         static_cast<int>(sampleRate_ * (kEchoDelayMs / 1000.0f)),
         1, kMaxEchoDelaySamples - 1);
@@ -488,7 +491,8 @@ void AudioEngine::dsp_echo(float* buf, int32_t frames) {
             % kMaxEchoDelaySamples;
         const float dry = buf[i];
         const float delayed = echoBuffer_[delayPos];
-        echoBuffer_[echoWritePos_] = dry + delayed * feedback;
+        echoFilterState_ = echoFilterState_ * 0.5f + delayed * 0.5f;
+        echoBuffer_[echoWritePos_] = dry + echoFilterState_ * feedback;
         buf[i] = dry * (1.0f - wet) + delayed * wet;
         echoWritePos_ = (echoWritePos_ + 1) % kMaxEchoDelaySamples;
     }
@@ -496,12 +500,10 @@ void AudioEngine::dsp_echo(float* buf, int32_t frames) {
 
 // ─── Final output gain with clipping protection ──────────────────────────────
 void AudioEngine::dsp_gain(float* buf, int32_t frames) {
-    const float slider = std::clamp(
-        params_.gain.load(std::memory_order_relaxed), 0.0f, 10000.0f);
-    const float multiplier = 1.0f + (slider / 10000.0f) *
-        (kMaxGainMultiplier - 1.0f);
+    const float multiplier = std::clamp(
+        params_.gain.load(std::memory_order_relaxed), 0.0f, kMaxGainMultiplier);
     for (int i = 0; i < frames; i++)
-        buf[i] = std::clamp(buf[i] * multiplier, -1.0f, 1.0f);
+        buf[i] = std::tanh(buf[i] * multiplier);
 }
 
 } // namespace micplugin
