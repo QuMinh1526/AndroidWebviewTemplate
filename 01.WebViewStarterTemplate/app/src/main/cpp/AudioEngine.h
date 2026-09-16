@@ -236,8 +236,9 @@ private:
     int32_t sampleRate_    = 48000;
     int32_t framesPerBurst_ = 128;
 
-    // Ring buffer: ~0.5 sec @ 48kHz
-    static constexpr size_t kRingSize = 32768;
+    // Ring buffer: ~1.3 sec @ 48kHz. WebView delivery intentionally tolerates
+    // more buffering so scheduler jitter does not turn into audible gaps.
+    static constexpr size_t kRingSize = 65536;
     SPSCRingBuffer<kRingSize> webRing_;
     SPSCRingBuffer<kRingSize> monitorRing_;
 

@@ -164,6 +164,16 @@ object SoftwareLoopback {
     fun setOutputDevice(context: Context, deviceId: Int) {
         selectedDeviceId = deviceId
         audioManager = audioManager ?: context.getSystemService(AudioManager::class.java)
+        if (Build.VERSION.SDK_INT < 23 || deviceId == -1) {
+            @Suppress("DEPRECATION")
+            audioManager?.isSpeakerphoneOn = false
+        } else {
+            val isSpeaker = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                ?.firstOrNull { it.id == deviceId }
+                ?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            @Suppress("DEPRECATION")
+            audioManager?.isSpeakerphoneOn = isSpeaker
+        }
         applyOutputDevice()
     }
 
@@ -217,6 +227,8 @@ object SoftwareLoopback {
                 } ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
             } else outputs.firstOrNull { it.id == selectedDeviceId }
             dev?.let { monitorTrack?.preferredDevice = it }
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = dev?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
         } catch (e: Exception) { Log.e(TAG, "applyOutputDevice: $e") }
     }
 
@@ -257,7 +269,7 @@ object SoftwareLoopback {
         if (Build.VERSION.SDK_INT >= 26) {
             AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 .setAudioFormat(AudioFormat.Builder()
                     .setSampleRate(SAMPLE_RATE)

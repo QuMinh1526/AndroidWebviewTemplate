@@ -91,9 +91,6 @@ int32_t AudioEngine::pullPcm(float* destination, int32_t maxFrames) {
     if (!destination || maxFrames <= 0) return 0;
     const size_t available = webRing_.available_read();
     if (available == 0) return 0;
-    if (available > static_cast<size_t>(maxFrames) * 2) {
-        webRing_.discard(available - static_cast<size_t>(maxFrames));
-    }
     const size_t count = std::min(
         webRing_.available_read(), static_cast<size_t>(maxFrames));
     return webRing_.read(destination, count) ? static_cast<int32_t>(count) : 0;

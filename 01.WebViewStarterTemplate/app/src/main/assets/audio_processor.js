@@ -238,7 +238,10 @@
   function buildPipeline(rawStream) {
     var AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass || !rawStream.getAudioTracks().length) return Promise.resolve(rawStream);
-    audioContext = new AudioContextClass();
+    // Prefer a playback-oriented context here. The native bridge is pull-based and
+    // a small jitter buffer is more valuable for microphone quality than minimum
+    // end-to-end latency.
+    audioContext = new AudioContextClass({latencyHint: "playback"});
     var source = audioContext.createMediaStreamSource(rawStream);
     rawPath = audioContext.createGain();
     rawPath.gain.value = settings.enabled ? 0 : 1;
@@ -313,19 +316,25 @@
 
   function createNativePcmStream() {
     var AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass || !audioContext.audioWorklet || !window.AudioWorkletNode ||
+    if (!AudioContextClass || !window.AudioWorkletNode ||
         !window.NativePcmBridge ||
         !window.NativePcmBridge.isRunning()) {
       return Promise.reject(new Error("native PCM bridge is not running"));
     }
-    audioContext = new AudioContextClass();
+    audioContext = new AudioContextClass({latencyHint: "playback"});
+    if (!audioContext.audioWorklet) {
+      try { audioContext.close(); } catch (_) {}
+      audioContext = null;
+      return Promise.reject(new Error("WebView AudioWorklet is unavailable"));
+    }
     var sourceCode = [
       "class NativePcmProcessor extends AudioWorkletProcessor {",
       "constructor() {",
       " super(); this.capacity=32768; this.buffer=new Float32Array(this.capacity);",
       " this.read=0; this.write=0; this.available=0; this.frac=0; this.inputRate=sampleRate;",
+      " this.started=false; this.target=Math.floor(sampleRate*.18);",
       " this.port.onmessage=e=>{",
-      "  if(e.data.type==='format'){this.inputRate=e.data.sampleRate||sampleRate;return;}",
+      "  if(e.data.type==='format'){this.inputRate=e.data.sampleRate||sampleRate;this.target=Math.floor(sampleRate*.18);return;}",
       "  var a=e.data.samples; if(!a)return;",
       "  var x=new Float32Array(a);",
       "  for(var i=0;i<x.length;i++){",
@@ -336,6 +345,7 @@
       "}",
       "process(inputs,outputs){",
       " var out=outputs[0]; if(!out||!out.length)return true; var ch=out[0];",
+      " if(!this.started){if(this.available<this.target){for(var w=0;w<ch.length;w++)ch[w]=0;return true;}this.started=true;}",
       " var step=this.inputRate/sampleRate;",
       " for(var i=0;i<ch.length;i++){",
       "  if(this.available<2){ch[i]=0;continue;}",
@@ -367,7 +377,7 @@
       nativePollTimer = setInterval(function () {
         try {
           if (!window.NativePcmBridge.isRunning()) return;
-          var packet = JSON.parse(window.NativePcmBridge.pullPcm(1024));
+          var packet = JSON.parse(window.NativePcmBridge.pullPcm(2048));
           if (packet.frames > 0 && packet.data) {
             var samples = decodeFloat32(packet.data);
             nativeNode.port.postMessage({samples: samples.buffer}, [samples.buffer]);
@@ -375,7 +385,7 @@
         } catch (error) {
           console.log("[audio_processor] native PCM pull failed", error);
         }
-      }, 10);
+      }, 20);
       return audioContext.resume().catch(function () {}).then(function () {
         return nativeStream;
       });
@@ -389,13 +399,15 @@
   }
 
   function nativeGetUserMedia(constraints) {
-    if (!nativeStreamPromise) {
-      nativeStreamPromise = createNativePcmStream();
-    }
-    var videoPromise = constraints.video
-      ? originalGetUserMedia(Object.assign({}, constraints, {audio: false}))
-      : Promise.resolve(new MediaStream());
-    return Promise.all([nativeStreamPromise, videoPromise]).then(function (streams) {
+    return Promise.resolve().then(function () {
+      if (!nativeStreamPromise) {
+        nativeStreamPromise = createNativePcmStream();
+      }
+      var videoPromise = constraints.video
+        ? originalGetUserMedia(Object.assign({}, constraints, {audio: false}))
+        : Promise.resolve(new MediaStream());
+      return Promise.all([nativeStreamPromise, videoPromise]);
+    }).then(function (streams) {
       var result = new MediaStream();
       streams[0].getAudioTracks().forEach(function (track) { result.addTrack(track.clone()); });
       streams[1].getVideoTracks().forEach(function (track) { result.addTrack(track); });
