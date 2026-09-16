@@ -238,11 +238,12 @@ class MainActivity : ComponentActivity() {
 
     private fun userAgentForMode(): String {
         if (!desktopMode) return mobileUserAgent
-        // Keep the exact Chromium/WebView Chrome version; only change the platform
-        // tokens that select the server's desktop representation.
+        // Lemur Browser-style desktop UA: full Windows/Chrome identity with no
+        // Mobile/Android tokens, so sites serve the wide desktop layout.
+        // Keep the WebView's real Chrome version token for OAuth compatibility.
         val chromeToken = Regex("Chrome/[^\\s]+")
-            .find(mobileUserAgent)?.value ?: "Chrome/" + Build.VERSION.RELEASE
-        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+            .find(mobileUserAgent)?.value ?: "Chrome/122.0.0.0"
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) $chromeToken Safari/537.36"
     }
 
