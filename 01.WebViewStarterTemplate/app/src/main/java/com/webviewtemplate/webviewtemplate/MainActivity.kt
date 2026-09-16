@@ -3,7 +3,6 @@ package com.webviewtemplate.webviewtemplate
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Dialog
-import android.app.AlertDialog
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.Intent
@@ -22,9 +21,6 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
-import android.widget.LinearLayout
-import android.widget.SeekBar
-import android.widget.TextView
 import android.webkit.PermissionRequest
 import android.webkit.CookieManager
 import android.webkit.ConsoleMessage
@@ -97,8 +93,6 @@ class MainActivity : ComponentActivity() {
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private var desktopMode = false
     private lateinit var mobileUserAgent: String
-    private var desktopViewportScript: androidx.webkit.ScriptHandler? = null
-    private var desktopViewportWidth = 1280
 
     private val levelPoller = object : Runnable {
         override fun run() {
@@ -131,7 +125,6 @@ class MainActivity : ComponentActivity() {
         webView = binding.webView
         preferences = getSharedPreferences(preferencesName, MODE_PRIVATE)
         desktopMode = preferences.getBoolean("desktop_site", false)
-        desktopViewportWidth = preferences.getInt("desktop_viewport_width", 1280).coerceIn(800, 1920)
         mobileUserAgent = WebSettings.getDefaultUserAgent(this)
         virtualMicService = VirtualMicService(applicationContext, shizukuManager)
         shizukuManager.init { state ->
@@ -177,8 +170,6 @@ class MainActivity : ComponentActivity() {
         }
         binding.btnDesktopSite.setOnClickListener { setDesktopMode(!desktopMode, reload = true) }
         updateDesktopModeUi()
-        binding.btnScale.setOnClickListener { showWebScaleDialog() }
-        updateWebScaleUi()
         binding.btnAudio.setOnClickListener { toggleAudio() }
         binding.btnAudioPanelToggle.setOnClickListener {
             val expanded = binding.audioControls.visibility != View.VISIBLE
@@ -225,8 +216,7 @@ class MainActivity : ComponentActivity() {
             builtInZoomControls = true
             displayZoomControls = false
             setUseWideViewPort(true)
-            loadWithOverviewMode = false
-            textZoom = 100
+            loadWithOverviewMode = true
             minimumFontSize = 6
             layoutAlgorithm = if (desktopMode) {
                 WebSettings.LayoutAlgorithm.NORMAL
@@ -238,9 +228,6 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
         }
-        view.settings.textZoom = 100
-        applyDesktopDisplayScale(view)
-        applyDesktopViewportScript()
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -255,70 +242,8 @@ class MainActivity : ComponentActivity() {
         // tokens that select the server's desktop representation.
         val chromeToken = Regex("Chrome/[^\\s]+")
             .find(mobileUserAgent)?.value ?: "Chrome/" + Build.VERSION.RELEASE
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) $chromeToken Safari/537.36"
-    }
-
-    private fun desktopViewportJs(): String = """
-        (function() {
-            var WANT = 'width=$desktopViewportWidth, initial-scale=${String.format(Locale.US, "%.3f", desktopInitialScaleRatio())}, minimum-scale=0.1, maximum-scale=5, user-scalable=yes';
-            function apply() {
-                var m = document.querySelector('meta[name="viewport"]');
-                if (!m) {
-                    m = document.createElement('meta');
-                    m.name = 'viewport';
-                    (document.head || document.documentElement).appendChild(m);
-                }
-                if (m.getAttribute('content') !== WANT) m.setAttribute('content', WANT);
-            }
-            apply();
-            var obs = new MutationObserver(function() {
-                var m = document.querySelector('meta[name="viewport"]');
-                if (m && m.getAttribute('content') !== WANT) apply();
-            });
-            if (document.documentElement) {
-                obs.observe(document.documentElement, {
-                    childList: true, subtree: true,
-                    attributes: true, attributeFilter: ['content']
-                });
-            }
-            document.addEventListener('DOMContentLoaded', apply);
-            window.addEventListener('load', apply);
-        })();
-    """.trimIndent()
-
-    private fun applyDesktopViewportScript() {
-        desktopViewportScript?.let {
-            it.remove()
-            desktopViewportScript = null
-        }
-        if (desktopMode && androidx.webkit.WebViewFeature.isFeatureSupported(
-                androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT
-            )) {
-            desktopViewportScript = androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                desktopViewportJs(),
-                setOf("*")
-            )
-        }
-    }
-
-    private fun desktopInitialScaleRatio(): Float {
-        val metrics = resources.displayMetrics
-        val screenWidthDp = metrics.widthPixels / metrics.density
-        return (screenWidthDp / desktopViewportWidth).coerceIn(0.1f, 2.0f)
-    }
-
-    private fun desktopInitialScalePercent(): Int =
-        (desktopInitialScaleRatio() * 100).toInt().coerceIn(10, 200)
-
-    private fun applyDesktopDisplayScale(view: WebView) {
-        view.settings.loadWithOverviewMode = false
-        if (desktopMode) {
-            view.setInitialScale(desktopInitialScalePercent())
-        } else {
-            view.setInitialScale(0)
-        }
     }
 
     private fun setDesktopMode(enabled: Boolean, reload: Boolean) {
@@ -328,8 +253,7 @@ class MainActivity : ComponentActivity() {
         webView.settings.apply {
             userAgentString = userAgentForMode()
             setUseWideViewPort(true)
-            loadWithOverviewMode = false
-            textZoom = 100
+            loadWithOverviewMode = true
             layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
@@ -339,18 +263,14 @@ class MainActivity : ComponentActivity() {
         popupWebView?.let { popup ->
             popup.settings.userAgentString = userAgentForMode()
             popup.settings.setUseWideViewPort(true)
-            popup.settings.loadWithOverviewMode = false
-            popup.settings.textZoom = 100
+            popup.settings.loadWithOverviewMode = true
             popup.settings.layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
-            applyDesktopDisplayScale(popup)
             if (reload && popup.url != null) popup.reload()
         }
-        applyDesktopDisplayScale(webView)
-        applyDesktopViewportScript()
         updateDesktopModeUi()
         if (reload && webView.url != null) {
             // UA and CSS media queries are evaluated during navigation; reload only
@@ -362,56 +282,6 @@ class MainActivity : ComponentActivity() {
     private fun updateDesktopModeUi() {
         binding.btnDesktopSite.text = if (desktopMode) "Desktop: ON" else "Desktop: OFF"
         binding.btnDesktopSite.isSelected = desktopMode
-    }
-
-    private fun updateWebScaleUi() {
-        binding.btnScale.text = "Width ${desktopViewportWidth}px"
-    }
-
-    private fun showWebScaleDialog() {
-        val label = TextView(this).apply {
-            text = "Desktop viewport width: ${desktopViewportWidth}px"
-            setPadding(24, 12, 24, 4)
-        }
-        val seekBar = SeekBar(this).apply {
-            max = 1120
-            progress = desktopViewportWidth - 800
-            setPadding(24, 8, 24, 8)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
-                    val width = (progress + 800).coerceIn(800, 1920)
-                    label.text = "Desktop viewport width: ${width}px"
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
-                override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
-            })
-        }
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(label)
-            addView(seekBar)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("Desktop resolution")
-            .setMessage("Chọn CSS viewport width để web render như màn hình desktop rộng/hẹp hơn.")
-            .setView(content)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Apply") { _, _ ->
-                desktopViewportWidth = (seekBar.progress + 800).coerceIn(800, 1920)
-                preferences.edit().putInt("desktop_viewport_width", desktopViewportWidth).apply()
-                webView.settings.textZoom = 100
-                applyDesktopDisplayScale(webView)
-                popupWebView?.let {
-                    it.settings.textZoom = 100
-                    applyDesktopDisplayScale(it)
-                    if (desktopMode && it.url != null) it.reload()
-                }
-                applyDesktopViewportScript()
-                updateWebScaleUi()
-                if (desktopMode && webView.url != null) webView.reload()
-            }
-            .show()
     }
 
     private fun createWebChromeClient(): WebChromeClient = object : WebChromeClient() {
@@ -971,10 +841,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         levelHandler.removeCallbacks(levelPoller)
-        desktopViewportScript?.let {
-            it.remove()
-            desktopViewportScript = null
-        }
         CookieManager.getInstance().flush()
         pendingFileCallback?.onReceiveValue(null)
         pendingFileCallback = null
