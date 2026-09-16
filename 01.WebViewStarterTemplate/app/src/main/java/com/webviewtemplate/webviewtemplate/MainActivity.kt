@@ -93,6 +93,7 @@ class MainActivity : ComponentActivity() {
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private var desktopMode = false
     private lateinit var mobileUserAgent: String
+    private var desktopViewportScript: androidx.webkit.ScriptHandler? = null
 
     private val levelPoller = object : Runnable {
         override fun run() {
@@ -216,8 +217,9 @@ class MainActivity : ComponentActivity() {
             builtInZoomControls = true
             displayZoomControls = false
             setUseWideViewPort(true)
-            loadWithOverviewMode = false
+            loadWithOverviewMode = true
             textZoom = 100
+            minimumFontSize = 6
             layoutAlgorithm = if (desktopMode) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
@@ -228,7 +230,7 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
         }
-        view.setInitialScale(0)
+        applyDesktopViewportScript()
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -243,8 +245,52 @@ class MainActivity : ComponentActivity() {
         // tokens that select the server's desktop representation.
         val chromeToken = Regex("Chrome/[^\\s]+")
             .find(mobileUserAgent)?.value ?: "Chrome/" + Build.VERSION.RELEASE
-        return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) $chromeToken Safari/537.36"
+    }
+
+    private fun desktopViewportJs(): String = """
+        (function() {
+            var WANT = 'width=1280, initial-scale=1, minimum-scale=0.25, maximum-scale=5, user-scalable=yes';
+            function apply() {
+                var m = document.querySelector('meta[name="viewport"]');
+                if (!m) {
+                    m = document.createElement('meta');
+                    m.name = 'viewport';
+                    (document.head || document.documentElement).appendChild(m);
+                }
+                if (m.getAttribute('content') !== WANT) m.setAttribute('content', WANT);
+            }
+            apply();
+            var obs = new MutationObserver(function() {
+                var m = document.querySelector('meta[name="viewport"]');
+                if (m && m.getAttribute('content') !== WANT) apply();
+            });
+            if (document.documentElement) {
+                obs.observe(document.documentElement, {
+                    childList: true, subtree: true,
+                    attributes: true, attributeFilter: ['content']
+                });
+            }
+            document.addEventListener('DOMContentLoaded', apply);
+            window.addEventListener('load', apply);
+        })();
+    """.trimIndent()
+
+    private fun applyDesktopViewportScript() {
+        desktopViewportScript?.let {
+            it.remove()
+            desktopViewportScript = null
+        }
+        if (desktopMode && androidx.webkit.WebViewFeature.isFeatureSupported(
+                androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT
+            )) {
+            desktopViewportScript = androidx.webkit.WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                desktopViewportJs(),
+                setOf("*")
+            )
+        }
     }
 
     private fun setDesktopMode(enabled: Boolean, reload: Boolean) {
@@ -254,19 +300,17 @@ class MainActivity : ComponentActivity() {
         webView.settings.apply {
             userAgentString = userAgentForMode()
             setUseWideViewPort(true)
-            loadWithOverviewMode = false
+            loadWithOverviewMode = true
             layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
         }
-        webView.setInitialScale(0)
         popupWebView?.let { popup ->
             popup.settings.userAgentString = userAgentForMode()
             popup.settings.setUseWideViewPort(true)
-            popup.settings.loadWithOverviewMode = false
-            popup.setInitialScale(0)
+            popup.settings.loadWithOverviewMode = true
             popup.settings.layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
@@ -274,6 +318,7 @@ class MainActivity : ComponentActivity() {
             }
             if (reload && popup.url != null) popup.reload()
         }
+        applyDesktopViewportScript()
         updateDesktopModeUi()
         if (reload && webView.url != null) {
             // UA and CSS media queries are evaluated during navigation; reload only
@@ -844,6 +889,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         levelHandler.removeCallbacks(levelPoller)
+        desktopViewportScript?.let {
+            it.remove()
+            desktopViewportScript = null
+        }
         CookieManager.getInstance().flush()
         pendingFileCallback?.onReceiveValue(null)
         pendingFileCallback = null
