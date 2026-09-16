@@ -225,7 +225,7 @@ class MainActivity : ComponentActivity() {
             builtInZoomControls = true
             displayZoomControls = false
             setUseWideViewPort(true)
-            loadWithOverviewMode = desktopMode
+            loadWithOverviewMode = false
             textZoom = 100
             minimumFontSize = 6
             layoutAlgorithm = if (desktopMode) {
@@ -239,6 +239,7 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
         }
         view.settings.textZoom = 100
+        applyDesktopDisplayScale(view)
         applyDesktopViewportScript()
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
@@ -260,7 +261,7 @@ class MainActivity : ComponentActivity() {
 
     private fun desktopViewportJs(): String = """
         (function() {
-            var WANT = 'width=$desktopViewportWidth, initial-scale=1, minimum-scale=0.25, maximum-scale=5, user-scalable=yes';
+            var WANT = 'width=$desktopViewportWidth, initial-scale=${String.format(Locale.US, "%.3f", desktopInitialScaleRatio())}, minimum-scale=0.1, maximum-scale=5, user-scalable=yes';
             function apply() {
                 var m = document.querySelector('meta[name="viewport"]');
                 if (!m) {
@@ -302,6 +303,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun desktopInitialScaleRatio(): Float {
+        val metrics = resources.displayMetrics
+        val screenWidthDp = metrics.widthPixels / metrics.density
+        return (screenWidthDp / desktopViewportWidth).coerceIn(0.1f, 2.0f)
+    }
+
+    private fun desktopInitialScalePercent(): Int =
+        (desktopInitialScaleRatio() * 100).toInt().coerceIn(10, 200)
+
+    private fun applyDesktopDisplayScale(view: WebView) {
+        view.settings.loadWithOverviewMode = false
+        if (desktopMode) {
+            view.setInitialScale(desktopInitialScalePercent())
+        } else {
+            view.setInitialScale(0)
+        }
+    }
+
     private fun setDesktopMode(enabled: Boolean, reload: Boolean) {
         if (desktopMode == enabled) return
         desktopMode = enabled
@@ -309,7 +328,7 @@ class MainActivity : ComponentActivity() {
         webView.settings.apply {
             userAgentString = userAgentForMode()
             setUseWideViewPort(true)
-            loadWithOverviewMode = enabled
+            loadWithOverviewMode = false
             textZoom = 100
             layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
@@ -320,15 +339,17 @@ class MainActivity : ComponentActivity() {
         popupWebView?.let { popup ->
             popup.settings.userAgentString = userAgentForMode()
             popup.settings.setUseWideViewPort(true)
-            popup.settings.loadWithOverviewMode = enabled
+            popup.settings.loadWithOverviewMode = false
             popup.settings.textZoom = 100
             popup.settings.layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
+            applyDesktopDisplayScale(popup)
             if (reload && popup.url != null) popup.reload()
         }
+        applyDesktopDisplayScale(webView)
         applyDesktopViewportScript()
         updateDesktopModeUi()
         if (reload && webView.url != null) {
@@ -380,10 +401,10 @@ class MainActivity : ComponentActivity() {
                 desktopViewportWidth = (seekBar.progress + 800).coerceIn(800, 1920)
                 preferences.edit().putInt("desktop_viewport_width", desktopViewportWidth).apply()
                 webView.settings.textZoom = 100
-                webView.settings.loadWithOverviewMode = desktopMode
+                applyDesktopDisplayScale(webView)
                 popupWebView?.let {
                     it.settings.textZoom = 100
-                    it.settings.loadWithOverviewMode = desktopMode
+                    applyDesktopDisplayScale(it)
                     if (desktopMode && it.url != null) it.reload()
                 }
                 applyDesktopViewportScript()
