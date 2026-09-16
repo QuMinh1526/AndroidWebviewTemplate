@@ -3,6 +3,7 @@ package com.webviewtemplate.webviewtemplate
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Dialog
+import android.app.AlertDialog
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.Intent
@@ -21,6 +22,7 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.widget.SeekBar
 import android.webkit.PermissionRequest
 import android.webkit.CookieManager
 import android.webkit.ConsoleMessage
@@ -94,6 +96,7 @@ class MainActivity : ComponentActivity() {
     private var desktopMode = false
     private lateinit var mobileUserAgent: String
     private var desktopViewportScript: androidx.webkit.ScriptHandler? = null
+    private var webScale = 100
 
     private val levelPoller = object : Runnable {
         override fun run() {
@@ -126,6 +129,7 @@ class MainActivity : ComponentActivity() {
         webView = binding.webView
         preferences = getSharedPreferences(preferencesName, MODE_PRIVATE)
         desktopMode = preferences.getBoolean("desktop_site", false)
+        webScale = preferences.getInt("web_scale", 100).coerceIn(50, 150)
         mobileUserAgent = WebSettings.getDefaultUserAgent(this)
         virtualMicService = VirtualMicService(applicationContext, shizukuManager)
         shizukuManager.init { state ->
@@ -171,6 +175,8 @@ class MainActivity : ComponentActivity() {
         }
         binding.btnDesktopSite.setOnClickListener { setDesktopMode(!desktopMode, reload = true) }
         updateDesktopModeUi()
+        binding.btnScale.setOnClickListener { showWebScaleDialog() }
+        updateWebScaleUi()
         binding.btnAudio.setOnClickListener { toggleAudio() }
         binding.btnAudioPanelToggle.setOnClickListener {
             val expanded = binding.audioControls.visibility != View.VISIBLE
@@ -230,6 +236,8 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
         }
+        view.settings.textZoom = webScale
+        view.setInitialScale(webScale)
         applyDesktopViewportScript()
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
@@ -301,21 +309,25 @@ class MainActivity : ComponentActivity() {
             userAgentString = userAgentForMode()
             setUseWideViewPort(true)
             loadWithOverviewMode = true
+            textZoom = webScale
             layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
         }
+        webView.setInitialScale(webScale)
         popupWebView?.let { popup ->
             popup.settings.userAgentString = userAgentForMode()
             popup.settings.setUseWideViewPort(true)
             popup.settings.loadWithOverviewMode = true
+            popup.settings.textZoom = webScale
             popup.settings.layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
+            popup.setInitialScale(webScale)
             if (reload && popup.url != null) popup.reload()
         }
         applyDesktopViewportScript()
@@ -330,6 +342,36 @@ class MainActivity : ComponentActivity() {
     private fun updateDesktopModeUi() {
         binding.btnDesktopSite.text = if (desktopMode) "Desktop: ON" else "Desktop: OFF"
         binding.btnDesktopSite.isSelected = desktopMode
+    }
+
+    private fun updateWebScaleUi() {
+        binding.btnScale.text = "Scale ${webScale}%"
+    }
+
+    private fun showWebScaleDialog() {
+        val seekBar = SeekBar(this).apply {
+            max = 100
+            progress = webScale - 50
+            setPadding(24, 8, 24, 8)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("WebView scale")
+            .setMessage("Chọn mức phóng to/thu nhỏ giao diện web")
+            .setView(seekBar)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Apply") { _, _ ->
+                webScale = (seekBar.progress + 50).coerceIn(50, 150)
+                preferences.edit().putInt("web_scale", webScale).apply()
+                webView.settings.textZoom = webScale
+                webView.setInitialScale(webScale)
+                popupWebView?.let {
+                    it.settings.textZoom = webScale
+                    it.setInitialScale(webScale)
+                }
+                updateWebScaleUi()
+                if (webView.url != null) webView.reload()
+            }
+            .show()
     }
 
     private fun createWebChromeClient(): WebChromeClient = object : WebChromeClient() {
