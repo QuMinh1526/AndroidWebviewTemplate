@@ -22,7 +22,9 @@ import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.widget.LinearLayout
 import android.widget.SeekBar
+import android.widget.TextView
 import android.webkit.PermissionRequest
 import android.webkit.CookieManager
 import android.webkit.ConsoleMessage
@@ -96,9 +98,7 @@ class MainActivity : ComponentActivity() {
     private var desktopMode = false
     private lateinit var mobileUserAgent: String
     private var desktopViewportScript: androidx.webkit.ScriptHandler? = null
-    private var webScale = 100
-    private var appliedMainWebScale = 100
-    private var appliedPopupWebScale = 100
+    private var desktopViewportWidth = 1280
 
     private val levelPoller = object : Runnable {
         override fun run() {
@@ -131,7 +131,7 @@ class MainActivity : ComponentActivity() {
         webView = binding.webView
         preferences = getSharedPreferences(preferencesName, MODE_PRIVATE)
         desktopMode = preferences.getBoolean("desktop_site", false)
-        webScale = preferences.getInt("web_scale", 100).coerceIn(50, 150)
+        desktopViewportWidth = preferences.getInt("desktop_viewport_width", 1280).coerceIn(800, 1920)
         mobileUserAgent = WebSettings.getDefaultUserAgent(this)
         virtualMicService = VirtualMicService(applicationContext, shizukuManager)
         shizukuManager.init { state ->
@@ -260,7 +260,7 @@ class MainActivity : ComponentActivity() {
 
     private fun desktopViewportJs(): String = """
         (function() {
-            var WANT = 'width=1280, initial-scale=1, minimum-scale=0.25, maximum-scale=5, user-scalable=yes';
+            var WANT = 'width=$desktopViewportWidth, initial-scale=1, minimum-scale=0.25, maximum-scale=5, user-scalable=yes';
             function apply() {
                 var m = document.querySelector('meta[name="viewport"]');
                 if (!m) {
@@ -302,40 +302,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun resetAppliedWebScale(view: WebView) {
-        when (view) {
-            webView -> appliedMainWebScale = 100
-            popupWebView -> appliedPopupWebScale = 100
-        }
-    }
-
-    private fun appliedWebScaleFor(view: WebView): Int = when (view) {
-        webView -> appliedMainWebScale
-        popupWebView -> appliedPopupWebScale
-        else -> 100
-    }
-
-    private fun setAppliedWebScaleFor(view: WebView, scale: Int) {
-        when (view) {
-            webView -> appliedMainWebScale = scale
-            popupWebView -> appliedPopupWebScale = scale
-        }
-    }
-
-    private fun applyWebPageScale(view: WebView, fromScale: Int = appliedWebScaleFor(view)) {
-        val previous = fromScale.coerceIn(50, 150)
-        val target = webScale.coerceIn(50, 150)
-        if (previous == target) return
-        view.post {
-            try {
-                view.zoomBy(target.toFloat() / previous.toFloat())
-                setAppliedWebScaleFor(view, target)
-            } catch (error: Exception) {
-                Log.w(TAG, "Unable to apply WebView page zoom", error)
-            }
-        }
-    }
-
     private fun setDesktopMode(enabled: Boolean, reload: Boolean) {
         if (desktopMode == enabled) return
         desktopMode = enabled
@@ -351,7 +317,6 @@ class MainActivity : ComponentActivity() {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
         }
-        resetAppliedWebScale(webView)
         popupWebView?.let { popup ->
             popup.settings.userAgentString = userAgentForMode()
             popup.settings.setUseWideViewPort(true)
@@ -362,7 +327,6 @@ class MainActivity : ComponentActivity() {
             } else {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
-            resetAppliedWebScale(popup)
             if (reload && popup.url != null) popup.reload()
         }
         applyDesktopViewportScript()
@@ -380,32 +344,51 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateWebScaleUi() {
-        binding.btnScale.text = "Zoom ${webScale}%"
+        binding.btnScale.text = "Width ${desktopViewportWidth}px"
     }
 
     private fun showWebScaleDialog() {
+        val label = TextView(this).apply {
+            text = "Desktop viewport width: ${desktopViewportWidth}px"
+            setPadding(24, 12, 24, 4)
+        }
         val seekBar = SeekBar(this).apply {
-            max = 100
-            progress = webScale - 50
+            max = 1120
+            progress = desktopViewportWidth - 800
             setPadding(24, 8, 24, 8)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    val width = (progress + 800).coerceIn(800, 1920)
+                    label.text = "Desktop viewport width: ${width}px"
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+            })
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label)
+            addView(seekBar)
         }
         AlertDialog.Builder(this)
-            .setTitle("WebView scale")
-            .setMessage("Chọn mức phóng to/thu nhỏ giao diện web")
-            .setView(seekBar)
+            .setTitle("Desktop resolution")
+            .setMessage("Chọn CSS viewport width để web render như màn hình desktop rộng/hẹp hơn.")
+            .setView(content)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Apply") { _, _ ->
-                webScale = (seekBar.progress + 50).coerceIn(50, 150)
-                preferences.edit().putInt("web_scale", webScale).apply()
+                desktopViewportWidth = (seekBar.progress + 800).coerceIn(800, 1920)
+                preferences.edit().putInt("desktop_viewport_width", desktopViewportWidth).apply()
                 webView.settings.textZoom = 100
                 webView.settings.loadWithOverviewMode = desktopMode
-                applyWebPageScale(webView)
                 popupWebView?.let {
                     it.settings.textZoom = 100
                     it.settings.loadWithOverviewMode = desktopMode
-                    applyWebPageScale(it)
+                    if (desktopMode && it.url != null) it.reload()
                 }
+                applyDesktopViewportScript()
                 updateWebScaleUi()
+                if (desktopMode && webView.url != null) webView.reload()
             }
             .show()
     }
@@ -527,7 +510,6 @@ class MainActivity : ComponentActivity() {
     private fun createWebViewClient(isPopup: Boolean): WebViewClient = object : WebViewClient() {
         override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
             super.onPageStarted(view, url, favicon)
-            resetAppliedWebScale(view)
             if (isPopup) return
             safeEvaluateJavascript(view, "window.__destroyAudioProcessor && window.__destroyAudioProcessor();")
             binding.pageProgress.progress = 0
@@ -538,7 +520,6 @@ class MainActivity : ComponentActivity() {
 
         override fun onPageFinished(view: WebView, url: String) {
             super.onPageFinished(view, url)
-            applyWebPageScale(view)
             if (isPopup) return
             binding.pageProgress.visibility = View.GONE
             binding.progressText.visibility = View.GONE
