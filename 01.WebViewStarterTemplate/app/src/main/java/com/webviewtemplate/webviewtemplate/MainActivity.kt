@@ -2,22 +2,33 @@ package com.webviewtemplate.webviewtemplate
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Dialog
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.net.Uri
+import android.app.DownloadManager
+import android.os.Environment
 import android.os.Build
 import android.os.Bundle
+import android.os.Message
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.webkit.PermissionRequest
 import android.webkit.CookieManager
+import android.webkit.ConsoleMessage
+import android.webkit.ValueCallback
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -28,6 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
@@ -52,6 +64,10 @@ import java.net.URLEncoder
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        private const val TAG = "WebViewTemplate.Main"
+        private const val FILE_CHOOSER_REQUEST_CODE = 2001
+    }
     // Set true temporarily to verify CrashActivity, then rebuild and launch the app.
     private val enableCrashTest = false
     private val recordAudioRequestCode = 1001
@@ -69,6 +85,12 @@ class MainActivity : ComponentActivity() {
     private val shizukuManager = ShizukuManager()
     private lateinit var virtualMicService: VirtualMicService
     private var documentStartAudioInstalled = false
+    private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
+    private var pendingWebPermissionResources: Array<String>? = null
+    private var popupWebView: WebView? = null
+    private var popupDialog: Dialog? = null
+    private var fullscreenView: View? = null
+    private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
 
     private val levelPoller = object : Runnable {
         override fun run() {
@@ -119,83 +141,13 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
-            mediaPlaybackRequiresUserGesture = false
-            // Keep the WebView's current Chromium UA. A stale hard-coded Chrome UA
-            // makes Facebook/TikTok/Discord reject modern login pages.
-            javaScriptCanOpenWindowsAutomatically = true
-            setSupportMultipleWindows(false)
-        }
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(webView, true)
-        }
+        configureWebView(webView)
         webView.addJavascriptInterface(NativePcmBridge(), "NativePcmBridge")
         installDocumentStartAudioBridge()
-        webView.webChromeClient = object : WebChromeClient() {
-            override fun onPermissionRequest(request: PermissionRequest) {
-                val audio = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }.toTypedArray()
-                if (audio.isEmpty()) return
-                runOnUiThread {
-                    if (ActivityCompat.checkSelfPermission(
-                            this@MainActivity,
-                            Manifest.permission.RECORD_AUDIO
-                        ) == PackageManager.PERMISSION_GRANTED
-                    ) {
-                        request.grant(audio)
-                    } else {
-                        pendingWebPermissionRequest = request
-                        ActivityCompat.requestPermissions(
-                            this@MainActivity,
-                            arrayOf(Manifest.permission.RECORD_AUDIO),
-                            recordAudioRequestCode
-                        )
-                    }
-                }
-            }
-
-            override fun onProgressChanged(view: WebView, newProgress: Int) {
-                super.onProgressChanged(view, newProgress)
-                binding.pageProgress.progress = newProgress
-                binding.progressText.text = "$newProgress%"
-                val visible = newProgress < 100
-                binding.pageProgress.visibility = if (visible) View.VISIBLE else View.GONE
-                binding.progressText.visibility = if (visible) View.VISIBLE else View.GONE
-            }
-        }
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                safeEvaluateJavascript(view, "window.__destroyAudioProcessor && window.__destroyAudioProcessor();")
-                binding.pageProgress.progress = 0
-                binding.progressText.text = "0%"
-                binding.pageProgress.visibility = View.VISIBLE
-                binding.progressText.visibility = View.VISIBLE
-            }
-
-            override fun onPageFinished(view: WebView, url: String) {
-                binding.pageProgress.visibility = View.GONE
-                binding.progressText.visibility = View.GONE
-                binding.addressBar.setText(view.url ?: url)
-                if (!documentStartAudioInstalled) {
-                    safeEvaluateJavascript(view, loadAsset("audio_processor.js"))
-                }
-                applyAudioSettings()
-                applyNativeRouteToWebView()
-            }
-
-            override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean {
-                return handleUrlOverride(request.url.toString())
-            }
-
-            @Suppress("DEPRECATION")
-            override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
-                return handleUrlOverride(url)
-            }
+        webView.webChromeClient = createWebChromeClient()
+        webView.webViewClient = createWebViewClient(isPopup = false)
+        webView.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+            enqueueDownload(url, userAgent, contentDisposition, mimeType)
         }
 
         binding.btnGo.setOnClickListener { loadUrlSmart(binding.addressBar.text.toString()) }
@@ -219,8 +171,12 @@ class MainActivity : ComponentActivity() {
             binding.btnAudioPanelToggle.text = if (expanded) "Audio -" else "Audio +"
         }
         populateAudioDevices()
-        binding.addressBar.setText(defaultUrl)
-        loadUrlSmart(defaultUrl)
+        if (savedInstanceState == null) {
+            binding.addressBar.setText(defaultUrl)
+            loadUrlSmart(defaultUrl)
+        } else {
+            binding.addressBar.setText(webView.url ?: defaultUrl)
+        }
         levelHandler.post(levelPoller)
     }
 
@@ -233,6 +189,237 @@ class MainActivity : ComponentActivity() {
             else -> "https://www.google.com/search?q=" + URLEncoder.encode(value, "UTF-8")
         }
         webView.loadUrl(url)
+    }
+
+    /** Configure only stable WebView/Chromium switches; networking remains Chromium-owned. */
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun configureWebView(view: WebView) {
+        view.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            cacheMode = WebSettings.LOAD_DEFAULT
+            loadsImagesAutomatically = true
+            blockNetworkImage = false
+            allowFileAccess = false
+            allowContentAccess = true
+            mediaPlaybackRequiresUserGesture = false
+            javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(true)
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
+        }
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                setAcceptThirdPartyCookies(view, true)
+            }
+        }
+    }
+
+    private fun createWebChromeClient(): WebChromeClient = object : WebChromeClient() {
+        override fun onPermissionRequest(request: PermissionRequest) {
+            val resources = request.resources.filter {
+                it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
+                    it == PermissionRequest.RESOURCE_VIDEO_CAPTURE
+            }.toTypedArray()
+            if (resources.isEmpty()) return
+            val permissions = buildList {
+                if (PermissionRequest.RESOURCE_AUDIO_CAPTURE in resources) add(Manifest.permission.RECORD_AUDIO)
+                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE in resources) add(Manifest.permission.CAMERA)
+            }.toTypedArray()
+            runOnUiThread {
+                val missing = permissions.filter {
+                    ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
+                }
+                if (missing.isEmpty()) {
+                    request.grant(resources)
+                } else {
+                    pendingWebPermissionRequest = request
+                    pendingWebPermissionResources = resources
+                    ActivityCompat.requestPermissions(this@MainActivity, missing.toTypedArray(), recordAudioRequestCode)
+                }
+            }
+        }
+
+        override fun onProgressChanged(view: WebView, newProgress: Int) {
+            super.onProgressChanged(view, newProgress)
+            if (view !== webView) return
+            binding.pageProgress.progress = newProgress
+            binding.progressText.text = "$newProgress%"
+            val visible = newProgress < 100
+            binding.pageProgress.visibility = if (visible) View.VISIBLE else View.GONE
+            binding.progressText.visibility = if (visible) View.VISIBLE else View.GONE
+        }
+
+        override fun onCreateWindow(
+            view: WebView,
+            isDialog: Boolean,
+            isUserGesture: Boolean,
+            resultMsg: Message
+        ): Boolean {
+            // Keep Chromium's popup decision at the WebView boundary. OAuth providers
+            // frequently open their window after an async callback, without a current
+            // gesture; rejecting that window causes an apparent infinite login spinner.
+            closePopup()
+            val child = WebView(this@MainActivity)
+            configureWebView(child)
+            child.addJavascriptInterface(NativePcmBridge(), "NativePcmBridge")
+            child.webViewClient = createWebViewClient(isPopup = true)
+            child.webChromeClient = createWebChromeClient()
+            child.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                enqueueDownload(url, userAgent, contentDisposition, mimeType)
+            }
+            popupWebView = child
+            popupDialog = Dialog(this@MainActivity).apply {
+                setTitle("Web authentication")
+                setContentView(child)
+                setOnDismissListener { closePopup() }
+                show()
+                window?.setLayout(
+                    (resources.displayMetrics.widthPixels * 0.96f).toInt(),
+                    (resources.displayMetrics.heightPixels * 0.90f).toInt()
+                )
+            }
+            (resultMsg.obj as WebView.WebViewTransport).webView = child
+            resultMsg.sendToTarget()
+            return true
+        }
+
+        override fun onCloseWindow(window: WebView) {
+            if (window === popupWebView) closePopup()
+            else super.onCloseWindow(window)
+        }
+
+        override fun onShowFileChooser(
+            webView: WebView,
+            filePathCallback: ValueCallback<Array<Uri>>,
+            fileChooserParams: FileChooserParams
+        ): Boolean {
+            pendingFileCallback?.onReceiveValue(null)
+            pendingFileCallback = filePathCallback
+            return try {
+                val intent = fileChooserParams.createIntent().apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                }
+                startActivityForResult(intent, FILE_CHOOSER_REQUEST_CODE)
+                true
+            } catch (error: Exception) {
+                pendingFileCallback = null
+                Log.w(TAG, "Unable to open WebView file chooser", error)
+                false
+            }
+        }
+
+        override fun onShowCustomView(view: View, callback: CustomViewCallback) {
+            onHideCustomView()
+            fullscreenView = view
+            fullscreenCallback = callback
+            (binding.root as ViewGroup).addView(
+                view,
+                ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            )
+            webView.visibility = View.GONE
+        }
+
+        override fun onHideCustomView() {
+            fullscreenView?.let { (it.parent as? ViewGroup)?.removeView(it) }
+            fullscreenView = null
+            fullscreenCallback?.onCustomViewHidden()
+            fullscreenCallback = null
+            webView.visibility = View.VISIBLE
+        }
+    }
+
+    private fun createWebViewClient(isPopup: Boolean): WebViewClient = object : WebViewClient() {
+        override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+            super.onPageStarted(view, url, favicon)
+            if (isPopup) return
+            safeEvaluateJavascript(view, "window.__destroyAudioProcessor && window.__destroyAudioProcessor();")
+            binding.pageProgress.progress = 0
+            binding.progressText.text = "0%"
+            binding.pageProgress.visibility = View.VISIBLE
+            binding.progressText.visibility = View.VISIBLE
+        }
+
+        override fun onPageFinished(view: WebView, url: String) {
+            super.onPageFinished(view, url)
+            if (isPopup) return
+            binding.pageProgress.visibility = View.GONE
+            binding.progressText.visibility = View.GONE
+            binding.addressBar.setText(view.url ?: url)
+            if (!documentStartAudioInstalled) safeEvaluateJavascript(view, loadAsset("audio_processor.js"))
+            applyAudioSettings()
+            applyNativeRouteToWebView()
+        }
+
+        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+            if (!request.isForMainFrame) return false
+            return handleUrlOverride(view, request.url.toString())
+        }
+
+        @Suppress("DEPRECATION")
+        override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean =
+            handleUrlOverride(view, url)
+
+        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+            super.onReceivedError(view, request, error)
+            if (!isPopup && request.isForMainFrame) showPageError("Không tải được trang (${error.errorCode})")
+        }
+
+        override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+            super.onReceivedHttpError(view, request, errorResponse)
+            if (!isPopup && request.isForMainFrame && errorResponse.statusCode >= 400) {
+                showPageError("Trang trả về HTTP ${errorResponse.statusCode}")
+            }
+        }
+
+        override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+            if (view === webView) {
+                Log.e(TAG, "WebView renderer exited; crash=${detail.didCrash()}")
+                runOnUiThread {
+                    showPageError("Trình render WebView đã dừng; đang khởi tạo lại…")
+                    if (!isFinishing) recreate()
+                }
+            } else {
+                closePopup()
+            }
+            return true
+        }
+    }
+
+    private fun showPageError(message: String) {
+        binding.pageProgress.visibility = View.GONE
+        binding.progressText.visibility = View.GONE
+        binding.audioStatus.text = message
+    }
+
+    private fun enqueueDownload(url: String, userAgent: String?, contentDisposition: String?, mimeType: String?) {
+        try {
+            val request = DownloadManager.Request(Uri.parse(url)).apply {
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setMimeType(mimeType)
+                addRequestHeader("User-Agent", userAgent ?: webView.settings.userAgentString)
+                CookieManager.getInstance().getCookie(url)?.let { addRequestHeader("Cookie", it) }
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, Uri.parse(url).lastPathSegment ?: "download")
+            }
+            (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to enqueue WebView download", error)
+        }
+    }
+
+    private fun closePopup() {
+        popupWebView?.apply {
+            stopLoading()
+            removeAllViews()
+            destroy()
+        }
+        popupWebView = null
+        popupDialog?.setOnDismissListener(null)
+        popupDialog?.dismiss()
+        popupDialog = null
     }
 
     private fun showMicSettings() {
@@ -472,13 +659,16 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != recordAudioRequestCode) return
-        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+        if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             pendingWebPermissionRequest?.let { request ->
+                val resources = pendingWebPermissionResources
                 pendingWebPermissionRequest = null
-                request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+                pendingWebPermissionResources = null
+                if (resources != null) request.grant(resources) else request.deny()
             } ?: toggleAudio()
         } else {
             pendingWebPermissionRequest = null
+            pendingWebPermissionResources = null
             android.widget.Toast.makeText(
                 this,
                 "Quyền microphone chưa được cấp; WebView vẫn hoạt động bình thường.",
@@ -495,17 +685,28 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleUrlOverride(url: String): Boolean {
-        if (url.startsWith("http://", true) || url.startsWith("https://", true)) {
+    private fun handleUrlOverride(view: WebView, url: String): Boolean {
+        if (url.startsWith("http://", true) || url.startsWith("https://", true) ||
+            url.startsWith("about:", true) || url.startsWith("data:", true) ||
+            url.startsWith("blob:", true) || url.startsWith("javascript:", true)) {
             return false
         }
         try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            val intent = if (url.startsWith("intent:", true)) {
+                Intent.parseUri(url, Intent.URI_INTENT_SCHEME).apply {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    component = null
+                }
+            } else {
+                Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            }
             if (intent.resolveActivity(packageManager) != null) {
                 startActivity(intent)
+            } else {
+                intent.getStringExtra("browser_fallback_url")?.let(view::loadUrl)
             }
         } catch (e: Exception) {
-            Log.w("WebViewApp", "Không mở được scheme lạ: $url", e)
+            Log.w(TAG, "Không mở được scheme lạ: ${Uri.parse(url).scheme}", e)
         }
         return true
     }
@@ -574,10 +775,40 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         levelHandler.removeCallbacks(levelPoller)
+        CookieManager.getInstance().flush()
+        pendingFileCallback?.onReceiveValue(null)
+        pendingFileCallback = null
+        fullscreenCallback?.onCustomViewHidden()
+        closePopup()
+        webView.stopLoading()
+        webView.webChromeClient = null
+        webView.destroy()
         settingsDialog?.dismiss()
         AudioProcessingService.onEngineReady = null
         AudioProcessingService.onEngineStartFailed = null
         virtualMicService.close()
         super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        webView.saveState(outState)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onPause() {
+        CookieManager.getInstance().flush()
+        super.onPause()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
+            val result = if (resultCode == RESULT_OK && data?.data != null) {
+                arrayOf(data.data!!)
+            } else null
+            pendingFileCallback?.onReceiveValue(result)
+            pendingFileCallback = null
+        }
     }
 }
