@@ -333,10 +333,18 @@ void AudioEngine::processEffectsChain(float* buf, int32_t frames) {
 // ─── Noise Gate ──────────────────────────────────────────────────────────────
 void AudioEngine::dsp_noiseGate(float* buf, int32_t frames) {
     float threshLin  = dBToLin(params_.gateThresholdDb.load(std::memory_order_relaxed));
-    float attackCoef = 1.0f - std::exp(-1.0f / (params_.gateAttackMs.load(std::memory_order_relaxed)
+    const bool preserveEffectTails =
+        params_.reverbEnabled.load(std::memory_order_relaxed) ||
+        params_.echoEnabled.load(std::memory_order_relaxed);
+    const float releaseMs = params_.gateReleaseMs.load(std::memory_order_relaxed) *
+        (preserveEffectTails ? 2.5f : 1.0f);
+    float attackCoef = 1.0f - std::exp(-1.0f / (std::max(0.1f, params_.gateAttackMs.load(std::memory_order_relaxed))
                         * 0.001f * sampleRate_));
-    float releaseCoef= 1.0f - std::exp(-1.0f / (params_.gateReleaseMs.load(std::memory_order_relaxed)
+    float releaseCoef= 1.0f - std::exp(-1.0f / (std::max(0.1f, releaseMs)
                         * 0.001f * sampleRate_));
+    // Leave a very small residual when time-based effects are active. This keeps
+    // reverb/echo feedback alive after speech stops instead of hard-cutting tails.
+    const float closedGain = preserveEffectTails ? 0.035f : 0.0f;
 
     for (int i = 0; i < frames; i++) {
         // RMS with single-pole smoothing
@@ -344,7 +352,7 @@ void AudioEngine::dsp_noiseGate(float* buf, int32_t frames) {
         gateRms_ = gateRms_ * 0.995f + x2 * 0.005f;
         float rms = std::sqrt(gateRms_);
 
-        float target = (rms > threshLin) ? 1.0f : 0.0f;
+        float target = (rms > threshLin) ? 1.0f : closedGain;
         float coef   = (target > gateEnv_) ? attackCoef : releaseCoef;
         gateEnv_    += coef * (target - gateEnv_);
         buf[i]      *= gateEnv_;
