@@ -17,6 +17,7 @@ import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.webkit.PermissionRequest
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -121,9 +122,17 @@ class MainActivity : ComponentActivity() {
         webView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            databaseEnabled = true
+            cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
-            userAgentString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            // Keep the WebView's current Chromium UA. A stale hard-coded Chrome UA
+            // makes Facebook/TikTok/Discord reject modern login pages.
+            javaScriptCanOpenWindowsAutomatically = true
+            setSupportMultipleWindows(false)
+        }
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            setAcceptThirdPartyCookies(webView, true)
         }
         webView.addJavascriptInterface(NativePcmBridge(), "NativePcmBridge")
         installDocumentStartAudioBridge()
