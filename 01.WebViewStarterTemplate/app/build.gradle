@@ -23,8 +23,8 @@ plugins {
             applicationId "com.webviewtemplate.webviewtemplate"
             minSdk 24
             targetSdk 34
-            versionCode 9
-            versionName "1.5.8"
+            versionCode 10
+            versionName "1.5.9"
             externalNativeBuild {
                 cmake {
                     cppFlags '-std=c++17', '-O2', '-ffast-math', '-DANDROID'
@@ -41,6 +41,9 @@ plugins {
                         storePassword signingProperties['storePassword']
                         keyAlias signingProperties['keyAlias']
                         keyPassword signingProperties['keyPassword']
+                        enableV1Signing true
+                        enableV2Signing true
+                        enableV3Signing true
                     }
                     : signingConfigs.debug
                 minifyEnabled true
