@@ -223,7 +223,7 @@ class MainActivity : ComponentActivity() {
             builtInZoomControls = true
             displayZoomControls = false
             setUseWideViewPort(true)
-            loadWithOverviewMode = true
+            loadWithOverviewMode = desktopMode && webScale == 100
             textZoom = 100
             minimumFontSize = 6
             layoutAlgorithm = if (desktopMode) {
@@ -236,7 +236,7 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
         }
-        view.settings.textZoom = webScale
+        view.settings.textZoom = 100
         view.setInitialScale(webScale)
         applyDesktopViewportScript()
         CookieManager.getInstance().apply {
@@ -259,7 +259,7 @@ class MainActivity : ComponentActivity() {
 
     private fun desktopViewportJs(): String = """
         (function() {
-            var WANT = 'width=1280, initial-scale=1, minimum-scale=0.25, maximum-scale=5, user-scalable=yes';
+            var WANT = 'width=1280, initial-scale=${String.format(Locale.US, "%.2f", webScale / 100f)}, minimum-scale=0.25, maximum-scale=5, user-scalable=yes';
             function apply() {
                 var m = document.querySelector('meta[name="viewport"]');
                 if (!m) {
@@ -308,8 +308,8 @@ class MainActivity : ComponentActivity() {
         webView.settings.apply {
             userAgentString = userAgentForMode()
             setUseWideViewPort(true)
-            loadWithOverviewMode = true
-            textZoom = webScale
+            loadWithOverviewMode = webScale == 100
+            textZoom = 100
             layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
@@ -320,8 +320,8 @@ class MainActivity : ComponentActivity() {
         popupWebView?.let { popup ->
             popup.settings.userAgentString = userAgentForMode()
             popup.settings.setUseWideViewPort(true)
-            popup.settings.loadWithOverviewMode = true
-            popup.settings.textZoom = webScale
+            popup.settings.loadWithOverviewMode = webScale == 100
+            popup.settings.textZoom = 100
             popup.settings.layoutAlgorithm = if (enabled) {
                 WebSettings.LayoutAlgorithm.NORMAL
             } else {
@@ -362,10 +362,12 @@ class MainActivity : ComponentActivity() {
             .setPositiveButton("Apply") { _, _ ->
                 webScale = (seekBar.progress + 50).coerceIn(50, 150)
                 preferences.edit().putInt("web_scale", webScale).apply()
-                webView.settings.textZoom = webScale
+                webView.settings.textZoom = 100
+                webView.settings.loadWithOverviewMode = webScale == 100
                 webView.setInitialScale(webScale)
                 popupWebView?.let {
-                    it.settings.textZoom = webScale
+                    it.settings.textZoom = 100
+                    it.settings.loadWithOverviewMode = webScale == 100
                     it.setInitialScale(webScale)
                 }
                 updateWebScaleUi()
