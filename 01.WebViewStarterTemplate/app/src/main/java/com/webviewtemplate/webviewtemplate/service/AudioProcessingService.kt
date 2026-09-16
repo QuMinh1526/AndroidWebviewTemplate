@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -60,6 +61,9 @@ class AudioProcessingService : Service() {
             val inputId = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
                 .getInt("input_device_id", -1)
             engine.start()
+            // sound.md #2: MODE_IN_COMMUNICATION kích hoạt đường lọc phần cứng (hardware AEC)
+            // cho WebRTC voice, tránh thu lẫn tiếng loa vào mic gây bể tiếng.
+            forceCommunicationMode(true)
             NativePcmBridge.setRouteMode("software")
             if (inputId != -1) engine.setInputDevice(inputId)
             SoftwareLoopback.start(this)
@@ -125,6 +129,7 @@ class AudioProcessingService : Service() {
         monitorThread?.interrupt()
         monitorThread?.join(500)
         monitorThread = null
+        forceCommunicationMode(false)
         SoftwareLoopback.stop()
         AudioEngine.shared.stop()
         wakeLock?.let {
@@ -135,6 +140,20 @@ class AudioProcessingService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /** sound.md #2: ép/mở chế độ đàm thoại MODE_IN_COMMUNICATION cho luồng voice. */
+    private fun forceCommunicationMode(enabled: Boolean) {
+        try {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            audioManager.mode = if (enabled) {
+                AudioManager.MODE_IN_COMMUNICATION
+            } else {
+                AudioManager.MODE_NORMAL
+            }
+        } catch (error: Exception) {
+            android.util.Log.w(TAG, "Unable to switch audio mode", error)
+        }
+    }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark glass theme: đảm bảo PopupMenu hiện nền tối, chữ sáng -->
+    <style name="Theme.WebViewTemplate" parent="Theme.AppCompat">
+        <item name="android:popupMenuStyle">@style/GlassPopupMenu</item>
+        <item name="popupMenuStyle">@style/GlassPopupMenu</item>
+        <item name="android:textAppearanceSmallPopupMenu">@style/GlassPopupText</item>
+        <item name="android:textAppearanceLargePopupMenu">@style/GlassPopupText</item>
+    </style>
+
+    <style name="GlassPopupMenu" parent="Widget.AppCompat.PopupMenu">
+        <item name="android:popupBackground">#F01A1A1E</item>
+        <item name="android:textColor">#F2F2F7</item>
+    </style>
+
+    <style name="GlassPopupText" parent="TextAppearance.AppCompat.Widget.PopupMenu.Small">
+        <item name="android:textColor">#F2F2F7</item>
+    </style>
+</resources>

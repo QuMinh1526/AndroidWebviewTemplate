@@ -32,6 +32,7 @@ import android.webkit.WebSettings
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.PopupMenu
 import androidx.activity.ComponentActivity
 import androidx.activity.ComponentDialog
 import androidx.compose.ui.platform.ComposeView
@@ -67,6 +68,11 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "WebViewTemplate.Main"
         private const val FILE_CHOOSER_REQUEST_CODE = 2001
+        private const val MENU_DESKTOP = 10
+        private const val MENU_AUDIO_PANEL = 11
+        private const val MENU_AUDIO_ENGINE = 12
+        private const val MENU_SHIZUKU = 13
+        private const val MENU_MIC_SETTINGS = 14
 
         /** Layout width (CSS px) faked while desktop mode is on, Lemur Browser-style. */
         private const val DESKTOP_LAYOUT_WIDTH = 1280
@@ -88,6 +94,7 @@ class MainActivity : ComponentActivity() {
     private val shizukuManager = ShizukuManager()
     private lateinit var virtualMicService: VirtualMicService
     private var documentStartAudioInstalled = false
+    private var popupScriptsInstalled = false
     private var pendingFileCallback: ValueCallback<Array<Uri>>? = null
     private var pendingWebPermissionResources: Array<String>? = null
     private var popupWebView: WebView? = null
@@ -126,6 +133,8 @@ class MainActivity : ComponentActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         webView = binding.webView
+        // sound.md #3: hardware acceleration để Opus/WASM của Discord không nghẽn CPU
+        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         preferences = getSharedPreferences(preferencesName, MODE_PRIVATE)
         desktopMode = preferences.getBoolean("desktop_site", false)
         mobileUserAgent = WebSettings.getDefaultUserAgent(this)
@@ -144,7 +153,11 @@ class MainActivity : ComponentActivity() {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(
                 android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
             ) {
-                if (webView.canGoBack()) webView.goBack() else finish()
+                when {
+                    popupDialog?.isShowing == true -> closePopup()
+                    webView.canGoBack() -> webView.goBack()
+                    else -> finish()
+                }
             }
         }
 
@@ -157,6 +170,14 @@ class MainActivity : ComponentActivity() {
             enqueueDownload(url, userAgent, contentDisposition, mimeType)
         }
 
+        binding.btnBack.setOnClickListener {
+            if (webView.canGoBack()) webView.goBack()
+            updateNavButtons()
+        }
+        binding.btnForward.setOnClickListener {
+            if (webView.canGoForward()) webView.goForward()
+            updateNavButtons()
+        }
         binding.btnGo.setOnClickListener { loadUrlSmart(binding.addressBar.text.toString()) }
         binding.addressBar.setOnEditorActionListener { _, actionId, event ->
             val go = actionId == EditorInfo.IME_ACTION_GO ||
@@ -164,9 +185,9 @@ class MainActivity : ComponentActivity() {
             if (go) loadUrlSmart(binding.addressBar.text.toString())
             go
         }
-        binding.btnSettings.setOnClickListener {
+        binding.btnSettings.setOnClickListener { anchor ->
             try {
-                showMicSettings()
+                showMainSettingsMenu(anchor)
             } catch (e: Exception) {
                 Log.e("MicSettingsCrash", "Lỗi khi mở settings", e)
             }
@@ -174,11 +195,7 @@ class MainActivity : ComponentActivity() {
         binding.btnDesktopSite.setOnClickListener { setDesktopMode(!desktopMode, reload = true) }
         updateDesktopModeUi()
         binding.btnAudio.setOnClickListener { toggleAudio() }
-        binding.btnAudioPanelToggle.setOnClickListener {
-            val expanded = binding.audioControls.visibility != View.VISIBLE
-            binding.audioControls.visibility = if (expanded) View.VISIBLE else View.GONE
-            binding.btnAudioPanelToggle.text = if (expanded) "Audio -" else "Audio +"
-        }
+        binding.btnAudioPanelToggle.setOnClickListener { toggleAudioPanel() }
         populateAudioDevices()
         if (savedInstanceState == null) {
             binding.addressBar.setText(defaultUrl)
@@ -198,6 +215,60 @@ class MainActivity : ComponentActivity() {
             else -> "https://www.google.com/search?q=" + URLEncoder.encode(value, "UTF-8")
         }
         webView.loadUrl(url)
+        updateNavButtons()
+    }
+
+    private fun updateNavButtons() {
+        if (!::webView.isInitialized) return
+        val canBack = webView.canGoBack()
+        val canForward = webView.canGoForward()
+        binding.btnBack.isEnabled = canBack
+        binding.btnForward.isEnabled = canForward
+        binding.btnBack.alpha = if (canBack) 1f else 0.35f
+        binding.btnForward.alpha = if (canForward) 1f else 0.35f
+    }
+
+    private fun toggleAudioPanel() {
+        val expanded = binding.audioControls.visibility != View.VISIBLE
+        binding.audioControls.visibility = if (expanded) View.VISIBLE else View.GONE
+        binding.btnAudioPanelToggle.text = if (expanded) "Audio -" else "Audio +"
+    }
+
+    /** ⚙ menu: gom Desktop / Audio panel / Engine / Shizuku / Mic DSP để toolbar thoáng hơn. */
+    private fun showMainSettingsMenu(anchor: View) {
+        val popup = PopupMenu(this, anchor)
+        popup.menu.add(0, MENU_DESKTOP, 0, if (desktopMode) "Desktop: ON" else "Desktop: OFF")
+        popup.menu.add(
+            0, MENU_AUDIO_PANEL, 1,
+            if (binding.audioControls.visibility == View.VISIBLE) "Hide audio panel" else "Show audio panel"
+        )
+        popup.menu.add(
+            0, MENU_AUDIO_ENGINE, 2,
+            if (AudioProcessingService.running.get()) "Stop audio engine" else "Start audio engine"
+        )
+        popup.menu.add(
+            0, MENU_SHIZUKU, 3,
+            "Shizuku: ${shizukuManager.state.name.lowercase().replace('_', ' ')}"
+        )
+        popup.menu.add(0, MENU_MIC_SETTINGS, 4, "Microphone DSP settings…")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                MENU_DESKTOP -> { setDesktopMode(!desktopMode, reload = true); true }
+                MENU_AUDIO_PANEL -> { toggleAudioPanel(); true }
+                MENU_AUDIO_ENGINE -> { toggleAudio(); true }
+                MENU_SHIZUKU -> { virtualMicService.requestShizukuPermission(); true }
+                MENU_MIC_SETTINGS -> {
+                    try {
+                        showMicSettings()
+                    } catch (e: Exception) {
+                        Log.e("MicSettingsCrash", "Lỗi khi mở settings", e)
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
     }
 
     /** Configure only stable WebView/Chromium switches; networking remains Chromium-owned. */
@@ -376,6 +447,7 @@ class MainActivity : ComponentActivity() {
             val visible = newProgress < 100
             binding.pageProgress.visibility = if (visible) View.VISIBLE else View.GONE
             binding.progressText.visibility = if (visible) View.VISIBLE else View.GONE
+            updateNavButtons()
         }
 
         override fun onCreateWindow(
@@ -391,6 +463,9 @@ class MainActivity : ComponentActivity() {
             val child = WebView(this@MainActivity)
             configureWebView(child)
             child.addJavascriptInterface(NativePcmBridge(), "NativePcmBridge")
+            // Popup (OAuth/login) cũng phải nhận bridge mic đã xử lý trước khi web chạy JS.
+            installDocumentStartScripts(child)
+            popupScriptsInstalled = true
             child.webViewClient = createWebViewClient(isPopup = true)
             child.webChromeClient = createWebChromeClient()
             child.setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
@@ -473,10 +548,17 @@ class MainActivity : ComponentActivity() {
             // Discord may rewrite the meta viewport after load; re-apply ours.
             // Popups never get document-start scripts, so this covers them too.
             injectDesktopViewportOverride(view)
-            if (isPopup) return
+            if (isPopup) {
+                if (!popupScriptsInstalled) {
+                    safeEvaluateJavascript(view, loadAsset("audio_processor.js"))
+                    applyNativeRouteToWebView()
+                }
+                return
+            }
             binding.pageProgress.visibility = View.GONE
             binding.progressText.visibility = View.GONE
             binding.addressBar.setText(view.url ?: url)
+            updateNavButtons()
             if (!documentStartAudioInstalled) safeEvaluateJavascript(view, loadAsset("audio_processor.js"))
             applyAudioSettings()
             applyNativeRouteToWebView()
@@ -545,6 +627,7 @@ class MainActivity : ComponentActivity() {
             destroy()
         }
         popupWebView = null
+        popupScriptsInstalled = false
         popupDialog?.setOnDismissListener(null)
         popupDialog?.dismiss()
         popupDialog = null
@@ -585,19 +668,28 @@ class MainActivity : ComponentActivity() {
     private fun installDocumentStartAudioBridge() {
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             documentStartAudioInstalled = true
-            WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                loadAsset("audio_processor.js"),
-                setOf("*")
-            )
-            // Pin the desktop viewport before the page's own scripts run, so
-            // Discord never sees a phone-width layout in the first place.
-            WebViewCompat.addDocumentStartJavaScript(
-                webView,
-                viewportOverrideScript(),
-                setOf("*")
-            )
+            installDocumentStartScripts(webView)
         }
+    }
+
+    /**
+     * Cài bridge mic đã xử lý (và pin viewport desktop) để chạy trước mọi script của
+     * trang, áp dụng cho cả WebView chính lẫn popup OAuth.
+     */
+    private fun installDocumentStartScripts(view: WebView) {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+        WebViewCompat.addDocumentStartJavaScript(
+            view,
+            loadAsset("audio_processor.js"),
+            setOf("*")
+        )
+        // Pin the desktop viewport before the page's own scripts run, so
+        // Discord never sees a phone-width layout in the first place.
+        WebViewCompat.addDocumentStartJavaScript(
+            view,
+            viewportOverrideScript(),
+            setOf("*")
+        )
     }
 
     private fun loadAsset(name: String): String =
@@ -611,6 +703,7 @@ class MainActivity : ComponentActivity() {
             binding.audioStatus.text = "Audio idle"
             safeEvaluateJavascript(webView, "window.__setNativeAudioRoute && window.__setNativeAudioRoute(false);")
             safeEvaluateJavascript(webView, "window.__destroyAudioProcessor && window.__destroyAudioProcessor();")
+            applyNativeRouteToWebView()
             return
         }
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
@@ -664,10 +757,9 @@ class MainActivity : ComponentActivity() {
             virtualMicService.activeTier != VirtualMicTier.SOFTWARE_LOOPBACK -> "privileged"
             else -> "software"
         }
-        safeEvaluateJavascript(
-            webView,
-            "window.__setNativeAudioMode && window.__setNativeAudioMode('$mode');"
-        )
+        val script = "window.__setNativeAudioMode && window.__setNativeAudioMode('$mode');"
+        safeEvaluateJavascript(webView, script)
+        popupWebView?.let { popup -> safeEvaluateJavascript(popup, script) }
     }
 
     private fun populateAudioDevices() {
@@ -923,6 +1015,20 @@ class MainActivity : ComponentActivity() {
         AudioProcessingService.onEngineStartFailed = null
         virtualMicService.close()
         super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (popupDialog?.isShowing == true) {
+            closePopup()
+            return
+        }
+        if (webView.canGoBack()) {
+            webView.goBack()
+            updateNavButtons()
+        } else {
+            super.onBackPressed()
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
