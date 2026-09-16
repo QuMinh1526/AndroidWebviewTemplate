@@ -167,6 +167,15 @@ object SoftwareLoopback {
         applyOutputDevice()
     }
 
+    fun findOutputDeviceId(context: Context, type: Int): Int =
+        if (Build.VERSION.SDK_INT >= 23) {
+            context.getSystemService(AudioManager::class.java)
+                .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .firstOrNull { it.type == type }?.id ?: -1
+        } else {
+            -1
+        }
+
     // ── Input device enumeration (fixes #5 — external sound cards had no way to
     //    be picked as the mic source; only the built-in mic was ever used) ─────
 

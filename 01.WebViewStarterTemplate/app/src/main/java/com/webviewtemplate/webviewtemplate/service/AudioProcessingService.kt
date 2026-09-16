@@ -63,9 +63,30 @@ class AudioProcessingService : Service() {
             NativePcmBridge.setRouteMode("software")
             if (inputId != -1) engine.setInputDevice(inputId)
             SoftwareLoopback.start(this)
-            val outputId = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
-                .getInt("output_device_id", -1)
-            if (outputId != -1) SoftwareLoopback.setOutputDevice(this, outputId)
+            when (getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getString("output_mode", "speaker")) {
+                "webview" -> SoftwareLoopback.setMonitorEnabled(false)
+                "earpiece" -> {
+                    SoftwareLoopback.setMonitorEnabled(true)
+                    SoftwareLoopback.setOutputDevice(
+                        this,
+                        SoftwareLoopback.findOutputDeviceId(
+                            this,
+                            android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                        )
+                    )
+                }
+                else -> {
+                    SoftwareLoopback.setMonitorEnabled(true)
+                    SoftwareLoopback.setOutputDevice(
+                        this,
+                        SoftwareLoopback.findOutputDeviceId(
+                            this,
+                            android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                        )
+                    )
+                }
+            }
             running.set(true)
             monitorThread = Thread({
                 while (running.get() && !stopping.get()) {

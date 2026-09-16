@@ -61,6 +61,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var preferences: SharedPreferences
     private val levelHandler = Handler(Looper.getMainLooper())
     private var settingsDialog: ComponentDialog? = null
+    private var pendingWebPermissionRequest: PermissionRequest? = null
     private var sheetSettings by mutableStateOf(AudioSettings())
     private var levelInfo by mutableStateOf(LevelInfo())
     private var nativeStackStarted = false
@@ -129,7 +130,23 @@ class MainActivity : ComponentActivity() {
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
                 val audio = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }.toTypedArray()
-                if (audio.isNotEmpty()) runOnUiThread { request.grant(audio) }
+                if (audio.isEmpty()) return
+                runOnUiThread {
+                    if (ActivityCompat.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED
+                    ) {
+                        request.grant(audio)
+                    } else {
+                        pendingWebPermissionRequest = request
+                        ActivityCompat.requestPermissions(
+                            this@MainActivity,
+                            arrayOf(Manifest.permission.RECORD_AUDIO),
+                            recordAudioRequestCode
+                        )
+                    }
+                }
             }
 
             override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -187,6 +204,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         binding.btnAudio.setOnClickListener { toggleAudio() }
+        binding.btnAudioPanelToggle.setOnClickListener {
+            val expanded = binding.audioControls.visibility != View.VISIBLE
+            binding.audioControls.visibility = if (expanded) View.VISIBLE else View.GONE
+            binding.btnAudioPanelToggle.text = if (expanded) "Audio -" else "Audio +"
+        }
         populateAudioDevices()
         binding.addressBar.setText(defaultUrl)
         loadUrlSmart(defaultUrl)
@@ -285,6 +307,7 @@ class MainActivity : ComponentActivity() {
                 binding.btnAudio.isEnabled = true
                 binding.btnAudio.text = "Stop audio"
                 binding.audioStatus.text = "Active · software monitor"
+                applyOutputMode()
                 applyNativeRouteToWebView()
             }
             virtualMicService.activateAsync(engine) { result ->
@@ -318,21 +341,43 @@ class MainActivity : ComponentActivity() {
 
     private fun populateAudioDevices() {
         val inputDevices = SoftwareLoopback.getInputDevices(this)
-        val outputDevices = SoftwareLoopback.getOutputDevices(this)
+        val inputLabels = listOf("Auto") + inputDevices
+            .filter { it.id != -1 }
+            .map { device ->
+                when {
+                    device.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC ->
+                        "Mic điện thoại"
+                    device.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                        device.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        device.type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                        device.type == android.media.AudioDeviceInfo.TYPE_USB_HEADSET ->
+                        "Mic tai nghe (${device.name})"
+                    else -> device.name
+                }
+            }
+        val outputLabels = listOf("Loa điện thoại", "Loa trong", "WebView")
         binding.inputDeviceSpinner.adapter = android.widget.ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
-            inputDevices.map { it.name }
+            inputLabels
         )
         binding.outputDeviceSpinner.adapter = android.widget.ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
-            outputDevices.map { it.name }
+            outputLabels
         )
         val inputId = preferences.getInt("input_device_id", -1)
-        val outputId = preferences.getInt("output_device_id", -1)
-        binding.inputDeviceSpinner.setSelection(inputDevices.indexOfFirst { it.id == inputId }.coerceAtLeast(0))
-        binding.outputDeviceSpinner.setSelection(outputDevices.indexOfFirst { it.id == outputId }.coerceAtLeast(0))
+        val outputMode = preferences.getString("output_mode", "speaker") ?: "speaker"
+        binding.inputDeviceSpinner.setSelection(
+            inputDevices.indexOfFirst { it.id == inputId }.coerceAtLeast(0)
+        )
+        binding.outputDeviceSpinner.setSelection(
+            when (outputMode) {
+                "earpiece" -> 1
+                "webview" -> 2
+                else -> 0
+            }
+        )
         binding.inputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -344,11 +389,66 @@ class MainActivity : ComponentActivity() {
         binding.outputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
-                val deviceId = outputDevices.getOrNull(position)?.id ?: -1
-                preferences.edit().putInt("output_device_id", deviceId).apply()
-                if (AudioProcessingService.running.get()) SoftwareLoopback.setOutputDevice(this@MainActivity, deviceId)
+                val mode = when (position) {
+                    1 -> "earpiece"
+                    2 -> "webview"
+                    else -> "speaker"
+                }
+                preferences.edit().putString("output_mode", mode).apply()
+                if (AudioProcessingService.running.get()) {
+                    when (mode) {
+                        "webview" -> SoftwareLoopback.setMonitorEnabled(false)
+                        "earpiece" -> {
+                            SoftwareLoopback.setMonitorEnabled(true)
+                            SoftwareLoopback.setOutputDevice(
+                                this@MainActivity,
+                                SoftwareLoopback.findOutputDeviceId(
+                                    this@MainActivity,
+                                    android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                                )
+                            )
+                        }
+                        else -> {
+                            SoftwareLoopback.setMonitorEnabled(true)
+                            SoftwareLoopback.setOutputDevice(
+                                this@MainActivity,
+                                SoftwareLoopback.findOutputDeviceId(
+                                    this@MainActivity,
+                                    android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                                )
+                            )
+                        }
+                    }
+                }
             }
         })
+    }
+
+    private fun applyOutputMode() {
+        if (!AudioProcessingService.running.get()) return
+        when (preferences.getString("output_mode", "speaker")) {
+            "webview" -> SoftwareLoopback.setMonitorEnabled(false)
+            "earpiece" -> {
+                SoftwareLoopback.setMonitorEnabled(true)
+                SoftwareLoopback.setOutputDevice(
+                    this,
+                    SoftwareLoopback.findOutputDeviceId(
+                        this,
+                        android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                    )
+                )
+            }
+            else -> {
+                SoftwareLoopback.setMonitorEnabled(true)
+                SoftwareLoopback.setOutputDevice(
+                    this,
+                    SoftwareLoopback.findOutputDeviceId(
+                        this,
+                        android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                    )
+                )
+            }
+        }
     }
 
     private fun applyAudioSettings() {
@@ -380,8 +480,12 @@ class MainActivity : ComponentActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != recordAudioRequestCode) return
         if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            toggleAudio()
+            pendingWebPermissionRequest?.let { request ->
+                pendingWebPermissionRequest = null
+                request.grant(arrayOf(PermissionRequest.RESOURCE_AUDIO_CAPTURE))
+            } ?: toggleAudio()
         } else {
+            pendingWebPermissionRequest = null
             android.widget.Toast.makeText(
                 this,
                 "Quyền microphone chưa được cấp; WebView vẫn hoạt động bình thường.",

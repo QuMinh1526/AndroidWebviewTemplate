@@ -36,12 +36,19 @@
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/audio_panel_header"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingStart="4dp"
         android:paddingEnd="4dp">
+
+        <Button
+            android:id="@+id/btn_audio_panel_toggle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Audio +" />
 
         <Button
             android:id="@+id/btn_audio"
@@ -60,10 +67,12 @@
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/audio_controls"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
+        android:visibility="gone"
         android:paddingStart="4dp"
         android:paddingEnd="4dp">
 
