@@ -271,13 +271,20 @@ private:
     AllpassFilter aps_[2]  = {AllpassFilter(556), AllpassFilter(441)};
 
     // ─ Pitch shifter state ─
+    // Four overlapping Hann-windowed grains avoid the discontinuities produced
+    // by the old single read pointer when its phase was forcibly corrected.
     static constexpr int kGrainSize = 2048;
-    static constexpr int kHopOut    = 512;
-    float pitchIn_[kGrainSize*2]{};
-    float pitchOut_[kGrainSize*2]{};
+    static constexpr int kGrainHop  = 512;
+    static constexpr int kPitchLatency = 3072;
+    static constexpr int kGrainCount = 4;
+    float pitchIn_[16384]{};
     float pitchWindow_[kGrainSize]{};
-    int   pitchWritePos_  = 0;
-    float pitchReadFrac_  = 0.0f;
+    float pitchGrainStart_[kGrainCount]{};
+    int pitchGrainAge_[kGrainCount]{};
+    int64_t pitchWriteTimeline_ = 0;
+    int pitchLaunchPhase_ = 0;
+    float pitchSourceCursor_ = 0.0f;
+    bool pitchPrimed_ = false;
     // pitchRateCache_ removed (unused)
 
     // ─ Echo state ─

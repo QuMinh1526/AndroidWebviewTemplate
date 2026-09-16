@@ -62,8 +62,8 @@ AudioEngine::AudioEngine() {
     for (int i = 0; i < kGrainSize; i++) {
         pitchWindow_[i] = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / kGrainSize));
     }
-    std::fill(pitchIn_,  pitchIn_  + kGrainSize*2, 0.0f);
-    std::fill(pitchOut_, pitchOut_ + kGrainSize*2, 0.0f);
+    std::fill(pitchIn_, pitchIn_ + sizeof(pitchIn_) / sizeof(float), 0.0f);
+    std::fill(pitchGrainAge_, pitchGrainAge_ + kGrainCount, kGrainSize);
 }
 
 AudioEngine::~AudioEngine() {
@@ -74,6 +74,12 @@ bool AudioEngine::start() {
     if (running_.load()) return true;
     webRing_.reset();
     monitorRing_.reset();
+    pitchWriteTimeline_ = 0;
+    pitchLaunchPhase_ = 0;
+    pitchSourceCursor_ = 0.0f;
+    pitchPrimed_ = false;
+    std::fill(pitchIn_, pitchIn_ + sizeof(pitchIn_) / sizeof(float), 0.0f);
+    std::fill(pitchGrainAge_, pitchGrainAge_ + kGrainCount, kGrainSize);
     if (!openStreams()) return false;
     running_.store(true, std::memory_order_release);
     LOGI("AudioEngine started: %dHz, %d frames/burst", sampleRate_, framesPerBurst_);
@@ -364,6 +370,7 @@ void AudioEngine::dsp_compressor(float* buf, int32_t frames) {
                         * 0.001f * sampleRate_));
     static constexpr float kKneeWidth = 6.0f; // dB
 
+    ratio = std::max(1.0f, ratio);
     float totalGR = 0.0f;
     for (int i = 0; i < frames; i++) {
         // RMS envelope
@@ -379,7 +386,7 @@ void AudioEngine::dsp_compressor(float* buf, int32_t frames) {
             float t = (over + kKneeWidth * 0.5f) / kKneeWidth;
             grDb = t * t * (over) * (1.0f - 1.0f/ratio);
         }
-        float targetGain = dBToLin(-grDb) * makeup;
+        float targetGain = std::clamp(dBToLin(-grDb) * makeup, 0.05f, 4.0f);
 
         // Smooth gain application
         float coef = (targetGain < 1.0f) ? attackCoef : releaseCoef;
@@ -404,34 +411,65 @@ void AudioEngine::dsp_reverb(float* buf, int32_t frames) {
     for (int i = 0; i < frames; i++) {
         float dry = buf[i];
         float wet = 0.0f;
-        for (auto& c : combs_)  wet += c.process(dry * 0.015f);
+        for (auto& c : combs_)  wet += c.process(dry);
         for (auto& a : aps_)    wet  = a.process(wet);
+        wet *= 0.25f;
         buf[i] = dry * (1.0f - mix) + wet * mix;
     }
 }
 
-// ─── Granular Pitch Shifter (OLA / time-stretch) ─────────────────────────────
+// ─── Granular Pitch Shifter (four-grain overlap-add) ─────────────────────────
 void AudioEngine::dsp_pitchShift(float* buf, int32_t frames) {
     float semitones = params_.pitchSemitones.load(std::memory_order_relaxed);
-    float rate      = std::pow(2.0f, semitones / 12.0f); // playback rate
+    float rate = std::clamp(std::pow(2.0f, semitones / 12.0f), 0.5f, 2.0f);
 
     for (int i = 0; i < frames; i++) {
-        // Write input
-        pitchIn_[pitchWritePos_ % (kGrainSize*2)] = buf[i];
-        pitchWritePos_++;
+        constexpr int kPitchBufferSize = sizeof(pitchIn_) / sizeof(float);
+        pitchIn_[pitchWriteTimeline_ % kPitchBufferSize] = buf[i];
+        pitchWriteTimeline_++;
 
-        // Read at variable rate (linear interpolation)
-        int   ri   = (int)pitchReadFrac_;
-        float frac = pitchReadFrac_ - ri;
-        int   i0   = ri % (kGrainSize*2);
-        int   i1   = (ri+1) % (kGrainSize*2);
-        buf[i]      = pitchIn_[i0] * (1.0f - frac) + pitchIn_[i1] * frac;
+        if (!pitchPrimed_) {
+            if (pitchWriteTimeline_ >= kPitchLatency) {
+                pitchSourceCursor_ = static_cast<float>(pitchWriteTimeline_ - kPitchLatency);
+                pitchPrimed_ = true;
+            } else {
+                buf[i] = 0.0f;
+                continue;
+            }
+        }
+        if (++pitchLaunchPhase_ >= kGrainHop) {
+            pitchLaunchPhase_ = 0;
+            int slot = 0;
+            for (int g = 1; g < kGrainCount; g++) {
+                if (pitchGrainAge_[g] > pitchGrainAge_[slot]) slot = g;
+            }
+            const float writeTimeline = static_cast<float>(pitchWriteTimeline_);
+            pitchSourceCursor_ = std::clamp(
+                pitchSourceCursor_, writeTimeline - kPitchBufferSize + 256.0f,
+                writeTimeline - 256.0f);
+            pitchGrainStart_[slot] = pitchSourceCursor_;
+            pitchGrainAge_[slot] = 0;
+            pitchSourceCursor_ += rate * kGrainHop;
+        }
 
-        pitchReadFrac_ += rate;
-        // Keep read pointer within 1 grain of write (latency = 1 grain)
-        float lag = pitchWritePos_ - pitchReadFrac_;
-        if (lag > kGrainSize*2 - 1) pitchReadFrac_ = pitchWritePos_ - kGrainSize;
-        if (lag < 1)               pitchReadFrac_ = pitchWritePos_ - kGrainSize;
+        float mixed = 0.0f;
+        float windowSum = 0.0f;
+        for (int g = 0; g < kGrainCount; g++) {
+            int age = pitchGrainAge_[g];
+            if (age >= kGrainSize) continue;
+            float source = pitchGrainStart_[g] + age * rate;
+            float wrapped = std::fmod(source, static_cast<float>(kPitchBufferSize));
+            if (wrapped < 0.0f) wrapped += sizeof(pitchIn_) / sizeof(float);
+            int i0 = static_cast<int>(wrapped);
+            int i1 = (i0 + 1) % kPitchBufferSize;
+            float frac = wrapped - i0;
+            float sample = pitchIn_[i0] * (1.0f - frac) + pitchIn_[i1] * frac;
+            float window = pitchWindow_[age];
+            mixed += sample * window;
+            windowSum += window;
+            pitchGrainAge_[g]++;
+        }
+        buf[i] = windowSum > 0.001f ? mixed / windowSum : 0.0f;
     }
 }
 
