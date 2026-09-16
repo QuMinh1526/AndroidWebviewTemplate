@@ -67,6 +67,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "WebViewTemplate.Main"
         private const val FILE_CHOOSER_REQUEST_CODE = 2001
+
+        /** Layout width (CSS px) faked while desktop mode is on, Lemur Browser-style. */
+        private const val DESKTOP_LAYOUT_WIDTH = 1280
     }
     // Set true temporarily to verify CrashActivity, then rebuild and launch the app.
     private val enableCrashTest = false
@@ -228,6 +231,8 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) offscreenPreRaster = false
         }
+        // Fake a wide layout viewport from the very first frame when starting in desktop mode.
+        view.setInitialScale(if (desktopMode) desktopInitialScalePercent() else 0)
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -251,6 +256,7 @@ class MainActivity : ComponentActivity() {
         if (desktopMode == enabled) return
         desktopMode = enabled
         preferences.edit().putBoolean("desktop_site", enabled).apply()
+        val initialScale = if (enabled) desktopInitialScalePercent() else 0
         webView.settings.apply {
             userAgentString = userAgentForMode()
             setUseWideViewPort(true)
@@ -261,6 +267,7 @@ class MainActivity : ComponentActivity() {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
         }
+        webView.setInitialScale(initialScale)
         popupWebView?.let { popup ->
             popup.settings.userAgentString = userAgentForMode()
             popup.settings.setUseWideViewPort(true)
@@ -270,6 +277,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 WebSettings.LayoutAlgorithm.TEXT_AUTOSIZING
             }
+            popup.setInitialScale(initialScale)
             if (reload && popup.url != null) popup.reload()
         }
         updateDesktopModeUi()
@@ -283,6 +291,56 @@ class MainActivity : ComponentActivity() {
     private fun updateDesktopModeUi() {
         binding.btnDesktopSite.text = if (desktopMode) "Desktop: ON" else "Desktop: OFF"
         binding.btnDesktopSite.isSelected = desktopMode
+    }
+
+    /**
+     * Initial zoom percent that fakes a ~1280px-wide layout viewport on a phone
+     * screen (Lemur-style "desktop site"), so CSS @media (max-width: 768px)
+     * breakpoints no longer match and desktop layouts are served.
+     */
+    private fun desktopInitialScalePercent(): Int {
+        val density = resources.displayMetrics.density
+        if (density <= 0f) return 50
+        val widthDp = resources.displayMetrics.widthPixels / density
+        val scale = (widthDp / DESKTOP_LAYOUT_WIDTH) * 100f
+        return scale.toInt().coerceIn(30, 100)
+    }
+
+    /**
+     * Re-writes the page's <meta name="viewport"> to a fixed 1280px width so the
+     * site cannot snap back to its mobile layout (Discord keeps overwriting it).
+     * Registered as a document-start script AND re-run at page-finish to win that
+     * race. Self-guards on the UA so it is a no-op in mobile mode.
+     */
+    private fun viewportOverrideScript(): String = """
+        (function() {
+            // Desktop UA is Windows; mobile UA always contains 'Android'.
+            if (/Android|iPhone|iPad|Mobile/.test(navigator.userAgent)) return;
+            function apply() {
+                var meta = document.querySelector('meta[name="viewport"]');
+                if (!meta) {
+                    meta = document.createElement('meta');
+                    meta.name = 'viewport';
+                    (document.head || document.documentElement).appendChild(meta);
+                }
+                meta.setAttribute('content', 'width=$DESKTOP_LAYOUT_WIDTH, initial-scale=0.4, maximum-scale=3.0, user-scalable=yes');
+            }
+            apply();
+            window.addEventListener('load', apply);
+            var attempts = 0;
+            var timer = setInterval(function() {
+                attempts++;
+                var meta = document.querySelector('meta[name="viewport"]');
+                var content = meta ? (meta.getAttribute('content') || '') : '';
+                if (content.indexOf('width=$DESKTOP_LAYOUT_WIDTH') === -1) apply();
+                if (attempts >= 20) clearInterval(timer);
+            }, 500);
+        })();
+    """.trimIndent()
+
+    private fun injectDesktopViewportOverride(view: WebView) {
+        if (!desktopMode) return
+        safeEvaluateJavascript(view, viewportOverrideScript())
     }
 
     private fun createWebChromeClient(): WebChromeClient = object : WebChromeClient() {
@@ -412,6 +470,9 @@ class MainActivity : ComponentActivity() {
 
         override fun onPageFinished(view: WebView, url: String) {
             super.onPageFinished(view, url)
+            // Discord may rewrite the meta viewport after load; re-apply ours.
+            // Popups never get document-start scripts, so this covers them too.
+            injectDesktopViewportOverride(view)
             if (isPopup) return
             binding.pageProgress.visibility = View.GONE
             binding.progressText.visibility = View.GONE
@@ -527,6 +588,13 @@ class MainActivity : ComponentActivity() {
             WebViewCompat.addDocumentStartJavaScript(
                 webView,
                 loadAsset("audio_processor.js"),
+                setOf("*")
+            )
+            // Pin the desktop viewport before the page's own scripts run, so
+            // Discord never sees a phone-width layout in the first place.
+            WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                viewportOverrideScript(),
                 setOf("*")
             )
         }
