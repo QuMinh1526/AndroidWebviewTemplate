@@ -3,3 +3,6 @@
 **/build/
 local.properties
 **/local.properties
+**/keystore.properties
+**/*.jks
+**/*.keystore

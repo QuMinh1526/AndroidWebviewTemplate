@@ -3,6 +3,16 @@ plugins {
         id 'kotlin-android'
     }
 
+    def signingPropertiesFile = rootProject.file('keystore.properties')
+    def signingProperties = new Properties()
+    if (signingPropertiesFile.exists()) {
+        signingPropertiesFile.withInputStream { signingProperties.load(it) }
+    }
+    if (!signingPropertiesFile.exists() && gradle.startParameter.taskNames.any {
+        it.toLowerCase().contains('release')
+    }) {
+        throw new GradleException('Missing keystore.properties: release builds must use the official signing key.')
+    }
 
     android {
         namespace 'com.webviewtemplate.webviewtemplate'
@@ -25,6 +35,14 @@ plugins {
 
         buildTypes {
             release {
+                signingConfig signingPropertiesFile.exists()
+                    ? signingConfigs.create('releaseOfficial') {
+                        storeFile rootProject.file(signingProperties['storeFile'])
+                        storePassword signingProperties['storePassword']
+                        keyAlias signingProperties['keyAlias']
+                        keyPassword signingProperties['keyPassword']
+                    }
+                    : signingConfigs.debug
                 minifyEnabled true
                 shrinkResources true
                 proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
