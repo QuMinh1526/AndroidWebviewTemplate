@@ -107,6 +107,9 @@
       settings.noiseSuppression = false;
       settings.autoGainControl = true;
       settings.channelCount = 1;
+      settings.sampleRate = 48000;
+      // new.md #3: báo latency 0 để web thu ngay từ frame đầu, không chờ VAD.
+      settings.latency = 0;
       return settings;
     };
     track.getCapabilities = function () {
@@ -118,8 +121,9 @@
         noiseSuppression: [false],
         autoGainControl: [true],
         channelCount: { min: 1, max: 2 },
-        sampleRate: { min: 8000, max: 48000 },
-        sampleSize: { min: 16, max: 16 }
+        sampleRate: { min: 48000, max: 48000 },
+        sampleSize: { min: 16, max: 16 },
+        latency: { min: 0, max: 0 }
       };
     };
     return track;

@@ -16,4 +16,10 @@
     <style name="GlassPopupText" parent="TextAppearance.AppCompat.Widget.PopupMenu.Small">
         <item name="android:textColor">#F2F2F7</item>
     </style>
+
+    <!-- new.md #1: Settings BottomSheet trượt từ dưới lên -->
+    <style name="BottomSheetSlide" parent="@android:style/Animation.Dialog">
+        <item name="android:windowEnterAnimation">@anim/slide_in_bottom</item>
+        <item name="android:windowExitAnimation">@anim/slide_out_bottom</item>
+    </style>
 </resources>

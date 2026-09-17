@@ -1,0 +1,258 @@
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_bottom_sheet"
+    android:orientation="vertical"
+    android:paddingStart="16dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="22dp">
+
+    <!-- Tay cầm kéo + tiêu đề -->
+    <View
+        android:layout_width="42dp"
+        android:layout_height="4dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_sheet_handle" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:letterSpacing="0.18"
+            android:text="@string/settings_title"
+            android:textColor="#F2F2F7"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_sheet_close"
+            style="?attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:background="@drawable/ripple_pill"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/settings_done"
+            android:textColor="#33D17A"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <!-- ===== Desktop mode ===== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_setting_row"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/settings_desktop_mode"
+            android:textColor="#F2F2F7"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/desktop_state"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.1"
+            android:text="@string/settings_desktop_off"
+            android:textColor="#33D17A"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <Switch
+            android:id="@+id/switch_desktop"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp" />
+    </LinearLayout>
+
+    <!-- ===== Audio ===== -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:letterSpacing="0.16"
+        android:text="@string/settings_audio_section"
+        android:textAllCaps="true"
+        android:textColor="#6B6B76"
+        android:textSize="10sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btn_audio"
+            style="?attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/ripple_pill_selectable"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:text="@string/audio_start"
+            android:textColor="#F2F2F7"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_audio_panel_toggle"
+            style="?attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/ripple_pill"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/audio_panel_show"
+            android:textColor="#F2F2F7"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/btn_mic_dsp"
+            style="?attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/ripple_pill"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="@string/mic_dsp_title"
+            android:textAllCaps="false"
+            android:textColor="#F2F2F7"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- Bộ chọn thiết bị Mic/Loa (Audio +/-) -->
+    <LinearLayout
+        android:id="@+id/audio_controls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_setting_row"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="4dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/spinner_mic_label"
+            android:textColor="#9A9AA5"
+            android:textSize="11sp" />
+
+        <Spinner
+            android:id="@+id/input_device_spinner"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="6dp"
+            android:text="@string/spinner_out_label"
+            android:textColor="#9A9AA5"
+            android:textSize="11sp" />
+
+        <Spinner
+            android:id="@+id/output_device_spinner"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/audio_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:text="@string/audio_idle"
+        android:textColor="#9A9AA5"
+        android:textSize="11sp" />
+
+    <!-- ===== Shizuku ===== -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="16dp"
+        android:background="#2E2E38" />
+
+    <LinearLayout
+        android:id="@+id/shizuku_row"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:background="@drawable/ripple_setting_row"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingTop="10dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="10dp">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/shizuku_label"
+                android:textColor="#F2F2F7"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/shizuku_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#9A9AA5"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/shizuku_hint"
+            android:textColor="#6B6B76"
+            android:textSize="10sp" />
+    </LinearLayout>
+</LinearLayout>

@@ -1,3 +1,28 @@
 <resources>
     <string name="app_name">webviewStarterTemplate</string>
+
+    <!-- Topbar -->
+    <string name="nav_back">&lt;</string>
+    <string name="nav_forward">&gt;</string>
+    <string name="nav_go">GO</string>
+    <string name="url_hint">Enter URL or search</string>
+    <string name="progress_zero">0%</string>
+
+    <!-- Settings bottom sheet -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_done">DONE</string>
+    <string name="settings_desktop_mode">Desktop mode</string>
+    <string name="settings_desktop_on">ON</string>
+    <string name="settings_desktop_off">OFF</string>
+    <string name="settings_audio_section">Audio</string>
+    <string name="audio_start">Start audio</string>
+    <string name="audio_stop">Stop audio</string>
+    <string name="audio_panel_show">Audio +</string>
+    <string name="audio_panel_hide">Audio −</string>
+    <string name="audio_idle">Audio idle</string>
+    <string name="mic_dsp_title">Mic DSP settings…</string>
+    <string name="shizuku_label">Shizuku</string>
+    <string name="shizuku_hint">tap to grant</string>
+    <string name="spinner_mic_label">Mic</string>
+    <string name="spinner_out_label">Out</string>
 </resources>

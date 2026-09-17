@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.content.Intent
 import android.net.Uri
 import android.app.DownloadManager
+import android.graphics.drawable.ColorDrawable
 import android.os.Environment
 import android.os.Build
 import android.os.Bundle
@@ -15,6 +16,7 @@ import android.os.Message
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -32,9 +34,9 @@ import android.webkit.WebSettings
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.PopupMenu
 import androidx.activity.ComponentActivity
 import androidx.activity.ComponentDialog
+import androidx.activity.OnBackPressedCallback
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,10 +49,12 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.webviewtemplate.webviewtemplate.databinding.ActivityMainBinding
+import com.webviewtemplate.webviewtemplate.databinding.DialogQuickSettingsBinding
 import com.webviewtemplate.webviewtemplate.audio.AudioEngine
 import com.webviewtemplate.webviewtemplate.audio.NativePcmBridge
 import com.webviewtemplate.webviewtemplate.service.AudioProcessingService
 import com.webviewtemplate.webviewtemplate.service.ShizukuManager
+import com.webviewtemplate.webviewtemplate.service.ShizukuState
 import com.webviewtemplate.webviewtemplate.service.SoftwareLoopback
 import com.webviewtemplate.webviewtemplate.service.VirtualMicResult
 import com.webviewtemplate.webviewtemplate.service.VirtualMicTier
@@ -68,11 +72,6 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "WebViewTemplate.Main"
         private const val FILE_CHOOSER_REQUEST_CODE = 2001
-        private const val MENU_DESKTOP = 10
-        private const val MENU_AUDIO_PANEL = 11
-        private const val MENU_AUDIO_ENGINE = 12
-        private const val MENU_SHIZUKU = 13
-        private const val MENU_MIC_SETTINGS = 14
 
         /** Layout width (CSS px) faked while desktop mode is on, Lemur Browser-style. */
         private const val DESKTOP_LAYOUT_WIDTH = 1280
@@ -87,6 +86,11 @@ class MainActivity : ComponentActivity() {
     private lateinit var preferences: SharedPreferences
     private val levelHandler = Handler(Looper.getMainLooper())
     private var settingsDialog: ComponentDialog? = null
+    private var quickSettingsDialog: ComponentDialog? = null
+    private var sheetBinding: DialogQuickSettingsBinding? = null
+    private var audioStatusText = "Audio idle"
+    private var audioPanelExpanded = true
+    private var shizukuState = ShizukuState.UNAVAILABLE
     private var pendingWebPermissionRequest: PermissionRequest? = null
     private var sheetSettings by mutableStateOf(AudioSettings())
     private var levelInfo by mutableStateOf(LevelInfo())
@@ -141,25 +145,35 @@ class MainActivity : ComponentActivity() {
         virtualMicService = VirtualMicService(applicationContext, shizukuManager)
         shizukuManager.init { state ->
             runOnUiThread {
-                if (!isFinishing && !AudioProcessingService.running.get()) {
-                    binding.audioStatus.text = "Audio idle · Shizuku: ${state.name}"
-                }
+                shizukuState = state
+                updateShizukuUi()
             }
         }
         sheetSettings = readSettings()
         if (enableCrashTest) throw RuntimeException("Test crash")
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            onBackInvokedDispatcher.registerOnBackInvokedCallback(
-                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
-            ) {
-                when {
-                    popupDialog?.isShowing == true -> closePopup()
-                    webView.canGoBack() -> webView.goBack()
-                    else -> finish()
+        // new.md #3: nút Back hệ điều hành ưu tiên đóng lớp phủ rồi mới điều hướng
+        // WebView, và chỉ thoát app khi trang hiện tại là trang đầu tiên.
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    when {
+                        settingsDialog?.isShowing == true -> settingsDialog?.dismiss()
+                        quickSettingsDialog?.isShowing == true -> quickSettingsDialog?.dismiss()
+                        popupDialog?.isShowing == true -> closePopup()
+                        webView.canGoBack() -> {
+                            webView.goBack()
+                            updateNavButtons()
+                        }
+                        else -> {
+                            isEnabled = false
+                            onBackPressedDispatcher.onBackPressed()
+                        }
+                    }
                 }
             }
-        }
+        )
 
         configureWebView(webView)
         webView.addJavascriptInterface(NativePcmBridge(), "NativePcmBridge")
@@ -185,18 +199,13 @@ class MainActivity : ComponentActivity() {
             if (go) loadUrlSmart(binding.addressBar.text.toString())
             go
         }
-        binding.btnSettings.setOnClickListener { anchor ->
+        binding.btnSettings.setOnClickListener {
             try {
-                showMainSettingsMenu(anchor)
+                showQuickSettings()
             } catch (e: Exception) {
                 Log.e("MicSettingsCrash", "Lỗi khi mở settings", e)
             }
         }
-        binding.btnDesktopSite.setOnClickListener { setDesktopMode(!desktopMode, reload = true) }
-        updateDesktopModeUi()
-        binding.btnAudio.setOnClickListener { toggleAudio() }
-        binding.btnAudioPanelToggle.setOnClickListener { toggleAudioPanel() }
-        populateAudioDevices()
         if (savedInstanceState == null) {
             binding.addressBar.setText(defaultUrl)
             loadUrlSmart(defaultUrl)
@@ -229,46 +238,89 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleAudioPanel() {
-        val expanded = binding.audioControls.visibility != View.VISIBLE
-        binding.audioControls.visibility = if (expanded) View.VISIBLE else View.GONE
-        binding.btnAudioPanelToggle.text = if (expanded) "Audio -" else "Audio +"
+        audioPanelExpanded = !audioPanelExpanded
+        sheetBinding?.let { sheet ->
+            sheet.audioControls.visibility = if (audioPanelExpanded) View.VISIBLE else View.GONE
+            sheet.btnAudioPanelToggle.text =
+                getString(if (audioPanelExpanded) R.string.audio_panel_hide else R.string.audio_panel_show)
+        }
     }
 
-    /** ⚙ menu: gom Desktop / Audio panel / Engine / Shizuku / Mic DSP để toolbar thoáng hơn. */
-    private fun showMainSettingsMenu(anchor: View) {
-        val popup = PopupMenu(this, anchor)
-        popup.menu.add(0, MENU_DESKTOP, 0, if (desktopMode) "Desktop: ON" else "Desktop: OFF")
-        popup.menu.add(
-            0, MENU_AUDIO_PANEL, 1,
-            if (binding.audioControls.visibility == View.VISIBLE) "Hide audio panel" else "Show audio panel"
-        )
-        popup.menu.add(
-            0, MENU_AUDIO_ENGINE, 2,
-            if (AudioProcessingService.running.get()) "Stop audio engine" else "Start audio engine"
-        )
-        popup.menu.add(
-            0, MENU_SHIZUKU, 3,
-            "Shizuku: ${shizukuManager.state.name.lowercase().replace('_', ' ')}"
-        )
-        popup.menu.add(0, MENU_MIC_SETTINGS, 4, "Microphone DSP settings…")
-        popup.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                MENU_DESKTOP -> { setDesktopMode(!desktopMode, reload = true); true }
-                MENU_AUDIO_PANEL -> { toggleAudioPanel(); true }
-                MENU_AUDIO_ENGINE -> { toggleAudio(); true }
-                MENU_SHIZUKU -> { virtualMicService.requestShizukuPermission(); true }
-                MENU_MIC_SETTINGS -> {
-                    try {
-                        showMicSettings()
-                    } catch (e: Exception) {
-                        Log.e("MicSettingsCrash", "Lỗi khi mở settings", e)
-                    }
-                    true
-                }
-                else -> false
+    /**
+     * new.md #1: toàn bộ tùy chọn phụ (Desktop Mode, Audio, Shizuku) nằm trong
+     * BottomSheet trượt từ dưới lên, mở bằng nút ⚙ trên toolbar.
+     */
+    private fun showQuickSettings() {
+        if (quickSettingsDialog?.isShowing == true) return
+        val sheet = DialogQuickSettingsBinding.inflate(layoutInflater)
+        sheetBinding = sheet
+        populateAudioDevices(sheet)
+        sheet.switchDesktop.setOnCheckedChangeListener { _, checked ->
+            setDesktopMode(checked, reload = true)
+        }
+        sheet.btnAudio.setOnClickListener { toggleAudio() }
+        sheet.btnAudioPanelToggle.setOnClickListener { toggleAudioPanel() }
+        sheet.btnMicDsp.setOnClickListener {
+            quickSettingsDialog?.dismiss()
+            try {
+                showMicSettings()
+            } catch (e: Exception) {
+                Log.e("MicSettingsCrash", "Lỗi khi mở settings", e)
             }
         }
-        popup.show()
+        sheet.shizukuRow.setOnClickListener { virtualMicService.requestShizukuPermission() }
+        sheet.btnSheetClose.setOnClickListener { quickSettingsDialog?.dismiss() }
+
+        val dialog = ComponentDialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(sheet.root)
+        dialog.setOnDismissListener {
+            if (sheetBinding === sheet) sheetBinding = null
+            quickSettingsDialog = null
+        }
+        quickSettingsDialog = dialog
+        syncSheetState(sheet)
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+            setWindowAnimations(R.style.BottomSheetSlide)
+            setGravity(Gravity.BOTTOM)
+            setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            )
+            attributes = attributes.apply { dimAmount = 0.55f }
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        }
+    }
+
+    /** Đồng bộ BottomSheet với trạng thái thật của app mỗi lần mở. */
+    private fun syncSheetState(sheet: DialogQuickSettingsBinding) {
+        sheet.switchDesktop.isChecked = desktopMode
+        sheet.desktopState.text = getString(
+            if (desktopMode) R.string.settings_desktop_on else R.string.settings_desktop_off
+        )
+        val running = AudioProcessingService.running.get()
+        sheet.btnAudio.text = getString(if (running) R.string.audio_stop else R.string.audio_start)
+        sheet.btnAudio.isEnabled = true
+        sheet.btnAudio.isSelected = running
+        sheet.audioControls.visibility = if (audioPanelExpanded) View.VISIBLE else View.GONE
+        sheet.btnAudioPanelToggle.text =
+            getString(if (audioPanelExpanded) R.string.audio_panel_hide else R.string.audio_panel_show)
+        sheet.audioStatus.text = audioStatusText
+        updateShizukuUi()
+    }
+
+    private fun setAudioStatus(message: String) {
+        audioStatusText = message
+        sheetBinding?.audioStatus?.text = message
+    }
+
+    private fun updateShizukuUi() {
+        shizukuState = shizukuManager.state
+        val text = getString(R.string.shizuku_label) + ": " +
+            shizukuState.name.lowercase().replace('_', ' ')
+        sheetBinding?.shizukuStatus?.text = text
     }
 
     /** Configure only stable WebView/Chromium switches; networking remains Chromium-owned. */
@@ -371,8 +423,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateDesktopModeUi() {
-        binding.btnDesktopSite.text = if (desktopMode) "Desktop: ON" else "Desktop: OFF"
-        binding.btnDesktopSite.isSelected = desktopMode
+        sheetBinding?.let { sheet ->
+            sheet.switchDesktop.isChecked = desktopMode
+            sheet.desktopState.text = getString(
+                if (desktopMode) R.string.settings_desktop_on else R.string.settings_desktop_off
+            )
+        }
     }
 
     /**
@@ -623,7 +679,10 @@ class MainActivity : ComponentActivity() {
     private fun showPageError(message: String) {
         binding.pageProgress.visibility = View.GONE
         binding.progressText.visibility = View.GONE
-        binding.audioStatus.text = message
+        // Dòng trạng thái giờ nằm trong BottomSheet nên lỗi tải trang phải báo
+        // trực tiếp cho người dùng để không bị "im lặng".
+        setAudioStatus(message)
+        android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
     }
 
     private fun enqueueDownload(url: String, userAgent: String?, contentDisposition: String?, mimeType: String?) {
@@ -720,8 +779,9 @@ class MainActivity : ComponentActivity() {
         if (AudioProcessingService.running.get()) {
             AudioProcessingService.stop(this)
             nativeStackStarted = false
-            binding.btnAudio.text = "Start audio"
-            binding.audioStatus.text = "Audio idle"
+            sheetBinding?.btnAudio?.text = getString(R.string.audio_start)
+            sheetBinding?.btnAudio?.isSelected = false
+            setAudioStatus(getString(R.string.audio_idle))
             safeEvaluateJavascript(webView, "window.__setNativeAudioRoute && window.__setNativeAudioRoute(false);")
             safeEvaluateJavascript(webView, "window.__destroyAudioProcessor && window.__destroyAudioProcessor();")
             applyNativeRouteToWebView()
@@ -737,21 +797,22 @@ class MainActivity : ComponentActivity() {
             )
             return
         }
-        binding.btnAudio.isEnabled = false
-        binding.audioStatus.text = "Starting audio engine…"
+        sheetBinding?.btnAudio?.isEnabled = false
+        setAudioStatus("Starting audio engine…")
         AudioProcessingService.onEngineStartFailed = { error ->
             runOnUiThread {
-                binding.btnAudio.isEnabled = true
-                binding.audioStatus.text = "Audio unavailable: ${error.message ?: "unknown error"}"
+                sheetBinding?.btnAudio?.isEnabled = true
+                setAudioStatus("Audio unavailable: ${error.message ?: "unknown error"}")
             }
         }
         AudioProcessingService.onEngineReady = { engine ->
             runOnUiThread {
                 nativeStackStarted = true
                 engine.apply(sheetSettings)
-                binding.btnAudio.isEnabled = true
-                binding.btnAudio.text = "Stop audio"
-                binding.audioStatus.text = "Active · software monitor"
+                sheetBinding?.btnAudio?.isEnabled = true
+                sheetBinding?.btnAudio?.text = getString(R.string.audio_stop)
+                sheetBinding?.btnAudio?.isSelected = true
+                setAudioStatus("Active · software monitor")
                 applyOutputMode()
                 applyNativeRouteToWebView()
             }
@@ -763,7 +824,7 @@ class MainActivity : ComponentActivity() {
                         is VirtualMicResult.Failed ->
                             "Active · software monitor (${result.reason})"
                     }
-                    binding.audioStatus.text = status
+                    setAudioStatus(status)
                     applyNativeRouteToWebView()
                 }
             }
@@ -783,7 +844,7 @@ class MainActivity : ComponentActivity() {
         popupWebView?.let { popup -> safeEvaluateJavascript(popup, script) }
     }
 
-    private fun populateAudioDevices() {
+    private fun populateAudioDevices(sheet: DialogQuickSettingsBinding) {
         val inputDevices = SoftwareLoopback.getInputDevices(this)
         val inputLabels = listOf("Auto") + inputDevices
             .filter { it.id != -1 }
@@ -800,29 +861,29 @@ class MainActivity : ComponentActivity() {
                 }
             }
         val outputLabels = listOf("Loa điện thoại", "Loa trong", "WebView")
-        binding.inputDeviceSpinner.adapter = android.widget.ArrayAdapter(
+        sheet.inputDeviceSpinner.adapter = android.widget.ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
             inputLabels
         )
-        binding.outputDeviceSpinner.adapter = android.widget.ArrayAdapter(
+        sheet.outputDeviceSpinner.adapter = android.widget.ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
             outputLabels
         )
         val inputId = preferences.getInt("input_device_id", -1)
         val outputMode = preferences.getString("output_mode", "speaker") ?: "speaker"
-        binding.inputDeviceSpinner.setSelection(
+        sheet.inputDeviceSpinner.setSelection(
             inputDevices.indexOfFirst { it.id == inputId }.coerceAtLeast(0)
         )
-        binding.outputDeviceSpinner.setSelection(
+        sheet.outputDeviceSpinner.setSelection(
             when (outputMode) {
                 "earpiece" -> 1
                 "webview" -> 2
                 else -> 0
             }
         )
-        binding.inputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
+        sheet.inputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val deviceId = inputDevices.getOrNull(position)?.id ?: -1
@@ -830,7 +891,7 @@ class MainActivity : ComponentActivity() {
                 if (nativeStackStarted && deviceId >= -1) AudioEngine.shared.setInputDevice(deviceId)
             }
         })
-        binding.outputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
+        sheet.outputDeviceSpinner.setOnItemSelectedListener(object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val mode = when (position) {
@@ -1032,24 +1093,12 @@ class MainActivity : ComponentActivity() {
         webView.webChromeClient = null
         webView.destroy()
         settingsDialog?.dismiss()
+        quickSettingsDialog?.dismiss()
+        sheetBinding = null
         AudioProcessingService.onEngineReady = null
         AudioProcessingService.onEngineStartFailed = null
         virtualMicService.close()
         super.onDestroy()
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (popupDialog?.isShowing == true) {
-            closePopup()
-            return
-        }
-        if (webView.canGoBack()) {
-            webView.goBack()
-            updateNavButtons()
-        } else {
-            super.onBackPressed()
-        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
