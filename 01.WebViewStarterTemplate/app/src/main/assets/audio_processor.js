@@ -11,6 +11,45 @@
   var VIRTUAL_MIC_GROUP = "virtual-mic-group";
   var VIRTUAL_MIC_LABEL = "Virtual Microphone (Processed)";
 
+  // ---- Console debug realtime: đẩy log về app qua NativePcmBridge.postLog ----
+  var logBuffer = [];
+  var LOG_FLUSH_MS = 250;
+  function postLog(level, message) {
+    var line = (typeof message === "string") ? message : safeStringify(message);
+    logBuffer.push(level + ": " + line);
+    if (logBuffer.length > 40) logBuffer.shift();
+    if (logTimer === null) {
+      logTimer = setTimeout(flushLogs, LOG_FLUSH_MS);
+    }
+  }
+  function safeStringify(value) {
+    try { return JSON.stringify(value); } catch (_) { return String(value); }
+  }
+  function flushLogs() {
+    logTimer = null;
+    if (!logBuffer.length) return;
+    var batch = logBuffer.join("\n");
+    logBuffer = [];
+    try {
+      if (window.NativePcmBridge && typeof window.NativePcmBridge.postLog === "function") {
+        window.NativePcmBridge.postLog("JS", batch);
+        return;
+      }
+    } catch (_) {}
+    if (window.__androidConsoleBridge && typeof window.__androidConsoleBridge.log === "function") {
+      try { window.__androidConsoleBridge.log(batch); } catch (_) {}
+    }
+  }
+  var logTimer = null;
+  var logThrottle = {};
+  function logThrottled(key, level, message, intervalMs) {
+    var now = Date.now();
+    if (logThrottle[key] && now - logThrottle[key] < (intervalMs || 2000)) return;
+    logThrottle[key] = now;
+    postLog(level, message);
+  }
+  postLog("INFO", "audio_processor v2 installed @ " + location.href);
+
   var originalGetUserMedia = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
     ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices) : null;
   var inputAnalyser = null, outputAnalyser = null, audioContext = null;
@@ -18,6 +57,7 @@
   var nativeNode = null, nativePollTimer = null, nativeStream = null, nativeStreamPromise = null;
   var lastNativeLevels = { inDb: -60, outDb: -60 };
   try { if (window.NativePcmBridge && window.NativePcmBridge.mode) nativeMode = window.NativePcmBridge.mode(); } catch (_) {}
+  postLog("INFO", "bridge mode khởi động = " + nativeMode);
 
   function engineReady() {
     return nativeMode !== "off" && !!window.NativePcmBridge &&
@@ -35,6 +75,7 @@
   }
 
   window.__destroyAudioProcessor = function () {
+    postLog("INFO", "__destroyAudioProcessor called");
     destroyNativeStream();
     if (audioContext) { try { audioContext.close(); } catch (_) {} }
     audioContext = null;
@@ -43,13 +84,24 @@
 
   window.__setNativeAudioMode = function (mode) {
     var next = mode === "software" || mode === "privileged" ? mode : "off";
-    if (next !== nativeMode) window.__destroyAudioProcessor();
+    if (next !== nativeMode) {
+      postLog("INFO", "native audio mode: " + nativeMode + " -> " + next);
+      if (nativeMode === "off" && next !== "off") {
+        // Chuyển từ "off" sang "software"/"privileged": chỉ reset promise nếu
+        // stream hiện tại KHÔNG chạy được — giữ nguyên stream đang phát tốt để
+        // không gián đoạn cuộc gọi giữa chừng (nguyên nhân mic "chết đột ngột").
+        if (nativeStreamPromise === null) {
+          postLog("INFO", "chưa có native stream -> sẽ tạo khi web xin mic");
+        } else if (!engineReady()) {
+          postLog("WARN", "native stream cũ lỗi (engine off) -> tạo lại");
+          destroyNativeStream();
+        } else {
+          postLog("INFO", "native stream đang chạy tốt -> giữ nguyên");
+        }
+      }
+      if (next === "off") destroyNativeStream();
+    }
     nativeMode = next;
-  };
-
-  // A privileged Shizuku/root route feeds Android's microphone path directly.
-  window.__setNativeAudioRoute = function (enabled) {
-    window.__setNativeAudioMode(enabled ? "privileged" : "off");
   };
 
   // ---- Tầng constraints: ép bộ lọc WebRTC chuẩn cho mọi web (dynamicmic.md) ----
@@ -57,8 +109,9 @@
     // sound.md: ép chuẩn WebRTC 48kHz/16bit/mono + AEC/AGC để Discord/Messenger
     // không phải resample từ 44.1kHz (nguyên nhân chính gây rè, méo tiếng).
     // fixmicoutput.md: noiseSuppression=false vì NS của Android hay nhầm tiếng người
-    // ở vài giây đầu thành tiếng ồn (mic chỉ thu được đoạn cuối), còn latency=0 ép
-    // luồng thu liên tục ngay từ frame đầu thay vì đợi VAD phát hiện giọng nói.
+    // ở vài giây đầu thành tiếng ồn (mic chỉ thu được đoạn cuối).
+    // KHÔNG ép latency=0: Chromium hiểu 0 là "overconstrained" -> NotReadableError
+    // khiến mic mở lỗi hoàn toàn. Buffer 180ms bên dưới vẫn xử lý yếu tố giật lag.
     if (constraints.audio === true) {
       constraints.audio = {
         sampleRate: { ideal: 48000 },
@@ -66,8 +119,7 @@
         channelCount: { ideal: 1 },
         echoCancellation: true,
         noiseSuppression: false,
-        autoGainControl: true,
-        latency: 0
+        autoGainControl: true
       };
       return;
     }
@@ -79,7 +131,7 @@
       a.echoCancellation = true;
       a.noiseSuppression = false;
       a.autoGainControl = true;
-      a.latency = 0;
+      delete a.latency;
     }
   }
 
@@ -108,8 +160,6 @@
       settings.autoGainControl = true;
       settings.channelCount = 1;
       settings.sampleRate = 48000;
-      // new.md #3: báo latency 0 để web thu ngay từ frame đầu, không chờ VAD.
-      settings.latency = 0;
       return settings;
     };
     track.getCapabilities = function () {
@@ -121,9 +171,11 @@
         noiseSuppression: [false],
         autoGainControl: [true],
         channelCount: { min: 1, max: 2 },
-        sampleRate: { min: 48000, max: 48000 },
-        sampleSize: { min: 16, max: 16 },
-        latency: { min: 0, max: 0 }
+        // Khôi phục dải sampleRate rộng 8k-48k: cache {48000,48000} cứng cộng với
+        // constraint sampleRate ideal 48000 của một số web (Discord gọi 2 lần với
+        // deviceId khác nhau) gây OverconstrainedError -> web tưởng "không có mic".
+        sampleRate: { min: 8000, max: 48000 },
+        sampleSize: { min: 16, max: 16 }
       };
     };
     return track;
@@ -193,52 +245,84 @@
   function createNativePcmStream() {
     var AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass || !window.AudioWorkletNode || !window.NativePcmBridge || !window.NativePcmBridge.isRunning()) {
+      var reason = !window.NativePcmBridge ? "NativePcmBridge chưa được inject"
+        : !window.NativePcmBridge.isRunning() ? "native engine chưa chạy (hãy bấm Start audio)"
+        : !window.AudioWorkletNode ? "WebView không hỗ trợ AudioWorklet"
+        : "AudioContext unavailable";
+      postLog("ERROR", "createNativePcmStream từ chối: " + reason);
       return Promise.reject(new Error("Native PCM bridge is not running; start the native audio service before requesting a microphone."));
     }
     audioContext = new AudioContextClass({latencyHint: "playback"});
     if (!audioContext.audioWorklet) {
       try { audioContext.close(); } catch (_) {}
       audioContext = null;
+      postLog("ERROR", "AudioWorklet không khả dụng trong WebView này");
       return Promise.reject(new Error("WebView AudioWorklet is unavailable"));
     }
     var sourceCode = [
       "class NativePcmProcessor extends AudioWorkletProcessor {",
-      "constructor(){super();this.capacity=32768;this.buffer=new Float32Array(this.capacity);this.read=0;this.write=0;this.available=0;this.frac=0;this.inputRate=sampleRate;this.started=false;this.target=Math.floor(sampleRate*.18);this.peak=0;this.tick=0;this.port.onmessage=e=>{if(e.data.type==='format'){this.inputRate=e.data.sampleRate||sampleRate;return;}var x=e.data.samples?new Float32Array(e.data.samples):null;if(!x)return;for(var i=0;i<x.length;i++){if(this.available>=this.capacity){this.read=(this.read+1)%this.capacity;this.available--;}this.buffer[this.write]=x[i];this.write=(this.write+1)%this.capacity;this.available++;}};}",
+      "constructor(){super();this.capacity=32768;this.buffer=new Float32Array(this.capacity);this.read=0;this.write=0;this.available=0;this.frac=0;this.inputRate=sampleRate;this.started=false;this.target=Math.floor(sampleRate*.18);this.peak=0;this.tick=0;this.lastFrameTime=currentTime;this.port.onmessage=e=>{if(e.data.type==='format'){this.inputRate=e.data.sampleRate||sampleRate;return;}var x=e.data.samples?new Float32Array(e.data.samples):null;if(!x)return;this.lastFrameTime=currentTime;for(var i=0;i<x.length;i++){if(this.available>=this.capacity){this.read=(this.read+1)%this.capacity;this.available--;}this.buffer[this.write]=x[i];this.write=(this.write+1)%this.capacity;this.available++;}};}",
       "process(inputs,outputs){var out=outputs[0];if(!out||!out.length)return true;var ch=out[0];if(!this.started){if(this.available<this.target){ch.fill(0);return true;}this.started=true;}var step=this.inputRate/sampleRate;for(var i=0;i<ch.length;i++){if(this.available<2){ch[i]=0;continue;}var p=Math.floor(this.frac),a=this.buffer[(this.read+p)%this.capacity],b=this.buffer[(this.read+p+1)%this.capacity];ch[i]=a+(b-a)*(this.frac-p);this.frac+=step;var consume=Math.floor(this.frac);this.frac-=consume;if(consume>0){var n=Math.min(consume,this.available-1);this.read=(this.read+n)%this.capacity;this.available-=n;}var v=ch[i]<0?-ch[i]:ch[i];if(v>this.peak)this.peak=v;}for(var c=1;c<out.length;c++)out[c].set(ch);if((this.tick=(this.tick+1)%8)===0){this.port.postMessage({type:'levels',peak:this.peak});this.peak=0;}return true;}",
-      "}", "registerProcessor('native-pcm-source',NativePcmProcessor);"
+            "registerProcessor('native-pcm-source',NativePcmProcessor);"
     ].join("\n");
     var url = URL.createObjectURL(new Blob([sourceCode], {type: "application/javascript"}));
+    postLog("INFO", "tạo AudioContext + worklet native-pcm-source…");
     return audioContext.audioWorklet.addModule(url).then(function () {
       URL.revokeObjectURL(url);
       nativeNode = new AudioWorkletNode(audioContext, "native-pcm-source", {numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1]});
+      var lastLevelsMsgAt = Date.now();
       nativeNode.port.onmessage = function (event) {
         var data = event && event.data;
         if (!data || data.type !== "levels") return;
+        lastLevelsMsgAt = Date.now();
         var db = data.peak > 0 ? Math.max(-60, 20 * Math.log10(data.peak)) : -60;
         lastNativeLevels = { inDb: db, outDb: db };
       };
+      nativeNode.port.onmessageerror = function () {
+        postLog("ERROR", "worklet message error — pipeline native PCM bị lỗi");
+      };
       var format = JSON.parse(window.NativePcmBridge.format());
+      postLog("INFO", "native format: " + format.sampleRate + "Hz, burst=" + format.framesPerBurst);
       nativeNode.port.postMessage({type: "format", sampleRate: format.sampleRate || audioContext.sampleRate});
       window.NativePcmBridge.clear();
       inputAnalyser = audioContext.createAnalyser(); inputAnalyser.fftSize = 1024; outputAnalyser = inputAnalyser;
       nativeNode.connect(inputAnalyser);
       var destination = audioContext.createMediaStreamDestination();
       inputAnalyser.connect(destination); nativeStream = destination.stream;
+      var idlePolls = 0;
       nativePollTimer = setInterval(function () {
         try {
-          if (!window.NativePcmBridge.isRunning()) return;
+          if (!window.NativePcmBridge.isRunning()) {
+            logThrottled("engine-off", "WARN", "poll: engine native KHÔNG chạy (isRunning=false) — mic sẽ im lặng", 5000);
+            return;
+          }
           var packet = JSON.parse(window.NativePcmBridge.pullPcm(2048));
           if (packet.frames > 0 && packet.data) {
+            idlePolls = 0;
             var samples = decodeFloat32(packet.data);
             nativeNode.port.postMessage({samples: samples.buffer}, [samples.buffer]);
+          } else {
+            idlePolls++;
+            logThrottled("pull-idle", "WARN", "poll: engine trả 0 frame (lần " + idlePolls + ") — engine chạy nhưng không thu được PCM", 5000);
           }
-        } catch (error) { console.error("[audio_processor] native PCM pull failed", error); }
+          // Self-heal: worklet ngừng gửi levels > 1s HOẶC engine im lặng kéo dài
+          // -> dựng lại toàn bộ stream. Đây là nguyên nhân "mic đang chạy rồi
+          // đột nhiên chết" mà không tự phục hồi.
+          var stalled = (Date.now() - lastLevelsMsgAt) > 1000;
+          if (idlePolls >= 50 || stalled) {
+            postLog("ERROR", "self-heal: " + (stalled ? "worklet ngừng xử lý >1s" : "engine im lặng ~1s") + " -> dựng lại native stream");
+            destroyNativeStream();
+          }
+        } catch (error) {
+          logThrottled("pull-error", "ERROR", "native PCM pull failed: " + (error && error.message), 3000);
+        }
       }, 20);
       return audioContext.resume().catch(function () {}).then(function () { return nativeStream; });
     }).catch(function (error) {
       URL.revokeObjectURL(url); destroyNativeStream();
       if (audioContext) { try { audioContext.close(); } catch (_) {} }
       audioContext = null;
+      postLog("ERROR", "createNativePcmStream thất bại: " + (error && error.message));
       throw error;
     });
   }
@@ -249,39 +333,56 @@
       var videoPromise = constraints.video ? originalGetUserMedia(Object.assign({}, constraints, {audio: false})) : Promise.resolve(new MediaStream());
       return Promise.all([nativeStreamPromise, videoPromise]);
     }).then(function (streams) {
+      postLog("INFO", "native mic stream OK: " + streams[0].getAudioTracks().length + " audio track(s) ảo");
       var result = new MediaStream();
       streams[0].getAudioTracks().forEach(function (track) {
         result.addTrack(enhanceVirtualTrack(track.clone()));
       });
       streams[1].getVideoTracks().forEach(function (track) { result.addTrack(track); });
       return result;
+    }).catch(function (error) {
+      // Không cache promise lỗi: lần getUserMedia tiếp theo phải được thử lại,
+      // nếu không mic sẽ chết vĩnh viễn cho tới khi reload trang.
+      postLog("ERROR", "nativeGetUserMedia lỗi: " + (error && error.message) + " — xoá cache stream");
+      destroyNativeStream();
+      throw error;
     });
   }
 
   if (originalGetUserMedia) {
     navigator.mediaDevices.getUserMedia = function (constraints) {
       if (!constraints || !constraints.audio) return originalGetUserMedia(constraints);
-      // Ép AEC/NS/AGC cho mọi yêu cầu mic, đúng chuẩn WebRTC (dynamicmic.md).
       sanitizeAudioConstraints(constraints);
       var explicitVirtual = constraintsAskForVirtualDevice(constraints.audio);
       var nativeAvailable = engineReady();
+      postLog("INFO", "getUserMedia audio: native=" + (nativeAvailable ? "ready" : "off") +
+        " mode=" + nativeMode + " explicitVirtual=" + explicitVirtual +
+        " constraints=" + safeStringify(constraints.audio).slice(0, 200));
       if (nativeAvailable && (explicitVirtual || nativeMode === "software")) {
         return nativeGetUserMedia(constraints).catch(function (error) {
           if (explicitVirtual || !originalGetUserMedia) throw error;
-          console.warn("[audio_processor] native mic stream failed; falling back to browser microphone", error);
+          postLog("WARN", "native stream lỗi -> fallback mic Chromium: " + (error && error.message));
           return originalGetUserMedia(constraints);
         });
       }
       // Privileged route: processed audio đã được bơm vào đường mic hệ thống.
-      if (nativeMode === "privileged") return originalGetUserMedia(constraints);
+      if (nativeMode === "privileged") {
+        postLog("INFO", "privileged route -> dùng mic hệ thống (đã xử lý)");
+        return originalGetUserMedia(constraints);
+      }
       // Engine chưa bật: vẫn dùng mic thật của Chromium (đã ép AEC/NS/AGC),
       // và tự chuyển sang stream đã xử lý nếu engine bật giữa chừng.
       return originalGetUserMedia(constraints).catch(function (error) {
-        if (!engineReady()) throw error;
-        console.warn("[audio_processor] browser microphone failed; retrying with processed native stream", error);
+        if (!engineReady()) {
+          postLog("ERROR", "mic Chromium lỗi & engine off: " + (error && (error.name + ": " + error.message)));
+          throw error;
+        }
+        postLog("WARN", "mic Chromium lỗi -> thử stream native đã xử lý: " + (error && error.message));
         return nativeGetUserMedia(constraints);
       });
     };
+  } else {
+    postLog("ERROR", "navigator.mediaDevices.getUserMedia không tồn tại — mic web sẽ không chạy");
   }
 
   if (navigator.mediaDevices) patchEnumerateDevices(navigator.mediaDevices);
@@ -297,4 +398,45 @@
       navigator.mediaDevices.getUserMedia(constraints).then(success, function (e) { if (error) error(e); });
     };
   }
+
+  // Console debug realtime: giám sát nhịp 3s — engine, route, meter, queue.
+  setInterval(function () {
+    flushLogs();
+    try {
+      if (!window.NativePcmBridge || typeof window.NativePcmBridge.diagnose !== "function") {
+        postLog("INFO", "[monitor] bridge chưa sẵn sàng");
+        return;
+      }
+      var d = JSON.parse(window.NativePcmBridge.diagnose());
+      var lv = window.__getLevels();
+      var inDb = (typeof lv.inDb === "number") ? lv.inDb.toFixed(0) : "?";
+      var streamState = nativeStream ? (nativeStream.active ? "active" : "INACTIVE") : "none";
+      var hint;
+      if (d.nativeHealthy) {
+        hint = (inDb > -50) ? "thu tốt" : "engine chạy nhưng METER YẾU -> kiểm tra nguồn mic/gate/permission";
+      } else {
+        hint = (nativeMode === "off") ? "engine tắt — bấm Start audio trong Settings"
+          : "engine HEALTHY=false (service bị kill?) -> Stop rồi Start lại audio";
+      }
+      postLog("INFO", "[monitor] route=" + d.routeMode + " healthy=" + d.nativeHealthy +
+        " inDb=" + inDb + " queue=" + d.queuedFrames + " frames" +
+        " stream=" + streamState + " mode=" + nativeMode + " — " + hint);
+    } catch (error) {
+      logThrottled("monitor-error", "ERROR", "monitor lỗi: " + (error && error.message), 5000);
+    }
+  }, 3000);
+
+  // Bắt lỗi/chặn console của chính trang (Discord văng NotReadableError v.v.)
+  window.addEventListener("error", function (event) {
+    if (event && event.message && /microphone|audio|getUserMedia|NotAllowed|NotReadable/i.test(event.message)) {
+      postLog("PAGE-ERR", event.message);
+    }
+  }, true);
+  window.addEventListener("unhandledrejection", function (event) {
+    var reason = event && event.reason;
+    var msg = reason && (reason.message || String(reason));
+    if (msg && /microphone|audio|getUserMedia|NotAllowed|NotReadable/i.test(msg)) {
+      postLog("PAGE-REJ", msg);
+    }
+  });
 })();

@@ -205,6 +205,75 @@
         android:textColor="#9A9AA5"
         android:textSize="11sp" />
 
+    <!-- ===== Console debug realtime ===== -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="16dp"
+        android:background="#2E2E38" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:letterSpacing="0.16"
+            android:text="@string/console_title"
+            android:textAllCaps="true"
+            android:textColor="#6B6B76"
+            android:textSize="10sp" />
+
+        <Button
+            android:id="@+id/btn_console_clear"
+            style="?attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="30dp"
+            android:background="@drawable/ripple_pill"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="@string/console_clear"
+            android:textColor="#9A9AA5"
+            android:textSize="11sp" />
+
+        <Button
+            android:id="@+id/btn_console_copy"
+            style="?attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="30dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/ripple_pill"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:text="@string/console_copy"
+            android:textColor="#33D17A"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/console_output"
+        android:layout_width="match_parent"
+        android:layout_height="180dp"
+        android:layout_marginTop="8dp"
+        android:background="#141418"
+        android:fontFamily="monospace"
+        android:gravity="top"
+        android:padding="10dp"
+        android:scrollbars="vertical"
+        android:textColor="#9A9AA5"
+        android:textIsSelectable="true"
+        android:textSize="10sp" />
+
     <!-- ===== Shizuku ===== -->
     <View
         android:layout_width="match_parent"

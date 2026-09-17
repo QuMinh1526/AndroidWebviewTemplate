@@ -25,4 +25,10 @@
     <string name="shizuku_hint">tap to grant</string>
     <string name="spinner_mic_label">Mic</string>
     <string name="spinner_out_label">Out</string>
+
+    <!-- Console debug realtime -->
+    <string name="console_title">Console (realtime)</string>
+    <string name="console_copy">Sao chép tất cả</string>
+    <string name="console_clear">Xoá</string>
+    <string name="console_copied">Đã sao chép %1$d dòng log</string>
 </resources>

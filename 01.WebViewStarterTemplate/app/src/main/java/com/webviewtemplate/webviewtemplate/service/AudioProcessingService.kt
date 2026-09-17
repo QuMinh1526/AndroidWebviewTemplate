@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import com.webviewtemplate.webviewtemplate.ConsoleLogStore
 import com.webviewtemplate.webviewtemplate.MainActivity
 import com.webviewtemplate.webviewtemplate.audio.AudioEngine
 import com.webviewtemplate.webviewtemplate.audio.NativePcmBridge
@@ -92,6 +93,7 @@ class AudioProcessingService : Service() {
                 }
             }
             running.set(true)
+            ConsoleLogStore.log("AudioService", "engine started, route=software, monitor pump active")
             monitorThread = Thread({
                 while (running.get() && !stopping.get()) {
                     val samples = engine.pullMonitorPcm(1024)
@@ -113,6 +115,7 @@ class AudioProcessingService : Service() {
             updateNotification("Active · software monitor")
         } catch (error: Exception) {
             android.util.Log.e(TAG, "Audio engine failed to start", error)
+            ConsoleLogStore.log("AudioService", "ENGINE START FAILED: ${error.message}")
             onEngineStartFailed?.invoke(error)
             updateNotification("Audio unavailable")
             stopSelf()
@@ -123,6 +126,7 @@ class AudioProcessingService : Service() {
     override fun onDestroy() {
         stopping.set(true)
         running.set(false)
+        ConsoleLogStore.log("AudioService", "service destroyed -> engine stopped, route=off")
         NativePcmBridge.setRouteMode("off")
         onEngineReady = null
         onEngineStartFailed = null

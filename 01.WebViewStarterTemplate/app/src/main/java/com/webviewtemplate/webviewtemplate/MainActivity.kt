@@ -75,6 +75,9 @@ class MainActivity : ComponentActivity() {
 
         /** Layout width (CSS px) faked while desktop mode is on, Lemur Browser-style. */
         private const val DESKTOP_LAYOUT_WIDTH = 1280
+
+        /** Giới hạn ký tự hiển thị trong panel Console debug. */
+        private const val MAX_CONSOLE_CHARS = 20000
     }
     // Set true temporarily to verify CrashActivity, then rebuild and launch the app.
     private val enableCrashTest = false
@@ -107,6 +110,28 @@ class MainActivity : ComponentActivity() {
     private var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     private var desktopMode = false
     private lateinit var mobileUserAgent: String
+
+    /** Panel Console (realtime): listener đẩy log vào TextView + nút Sao chép tất cả. */
+    private val consoleBuffer = StringBuilder()
+    private val consoleListener = object : ConsoleLogStore.Listener {
+        override fun onLogLine(line: String) {
+            if (consoleBuffer.isNotEmpty()) consoleBuffer.append('\n')
+            consoleBuffer.append(line)
+            // Chừa lại MAX_CONSOLE_CHARS ký tự cuối để TextView không phình vô hạn.
+            val overflow = consoleBuffer.length - MAX_CONSOLE_CHARS
+            if (overflow > 0) {
+                val cutoff = consoleBuffer.indexOf("\n", overflow)
+                consoleBuffer.delete(0, if (cutoff >= 0) cutoff + 1 else overflow)
+            }
+            consoleTextView?.text = consoleBuffer
+        }
+
+        override fun onCleared() {
+            consoleBuffer.setLength(0)
+            consoleTextView?.text = ""
+        }
+    }
+    private var consoleTextView: android.widget.TextView? = null
 
     private val levelPoller = object : Runnable {
         override fun run() {
@@ -213,6 +238,7 @@ class MainActivity : ComponentActivity() {
             binding.addressBar.setText(webView.url ?: defaultUrl)
         }
         levelHandler.post(levelPoller)
+        ConsoleLogStore.log("App", "MainActivity created (v1.10.0 + console debug)")
     }
 
     private fun loadUrlSmart(input: String) {
@@ -271,12 +297,29 @@ class MainActivity : ComponentActivity() {
         sheet.shizukuRow.setOnClickListener { virtualMicService.requestShizukuPermission() }
         sheet.btnSheetClose.setOnClickListener { quickSettingsDialog?.dismiss() }
 
+        // Console debug realtime: gắn listener log, nút "Sao chép tất cả" và Xoá.
+        consoleTextView = sheet.consoleOutput
+        ConsoleLogStore.addListener(consoleListener)
+        sheet.btnConsoleCopy.setOnClickListener {
+            val text = ConsoleLogStore.snapshot()
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("console_logs", text))
+            android.widget.Toast.makeText(
+                this,
+                getString(R.string.console_copied, ConsoleLogStore.lineCount),
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+        sheet.btnConsoleClear.setOnClickListener { ConsoleLogStore.clear() }
+
         val dialog = ComponentDialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(sheet.root)
         dialog.setOnDismissListener {
             if (sheetBinding === sheet) sheetBinding = null
             quickSettingsDialog = null
+            ConsoleLogStore.removeListener(consoleListener)
+            consoleTextView = null
         }
         quickSettingsDialog = dialog
         syncSheetState(sheet)
@@ -296,6 +339,11 @@ class MainActivity : ComponentActivity() {
 
     /** Đồng bộ BottomSheet với trạng thái thật của app mỗi lần mở. */
     private fun syncSheetState(sheet: DialogQuickSettingsBinding) {
+        ConsoleLogStore.log(
+            "App",
+            "Settings mở: audio=${if (AudioProcessingService.running.get()) "ON" else "OFF"}, " +
+                "tier=${virtualMicService.activeTier.name}, shizuku=${shizukuManager.state.name}"
+        )
         sheet.switchDesktop.isChecked = desktopMode
         sheet.desktopState.text = getString(
             if (desktopMode) R.string.settings_desktop_on else R.string.settings_desktop_off
@@ -482,6 +530,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun createWebChromeClient(): WebChromeClient = object : WebChromeClient() {
+        // Console debug realtime: bắt log/error JS của chính trang web (Discord,
+        // TikTok...) để thấy ngay lỗi getUserMedia/NotReadable ngay trong app.
+        override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+            val level = when (consoleMessage.messageLevel()) {
+                ConsoleMessage.MessageLevel.ERROR -> "PAGE-ERR"
+                ConsoleMessage.MessageLevel.WARNING -> "PAGE-WARN"
+                else -> "PAGE"
+            }
+            ConsoleLogStore.log(
+                level,
+                "${consoleMessage.sourceId()?.substringAfterLast('/') ?: "?"}:${consoleMessage.lineNumber()} ${consoleMessage.message()}"
+            )
+            return true
+        }
+
         override fun onPermissionRequest(request: PermissionRequest) {
             val resources = request.resources.filter {
                 it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
@@ -496,8 +559,13 @@ class MainActivity : ComponentActivity() {
                 val missing = permissions.filter {
                     ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
                 }
+                ConsoleLogStore.log(
+                    "Permission",
+                    "web xin quyền: ${resources.joinToString()} | app đã có đủ=${missing.isEmpty()}"
+                )
                 if (missing.isEmpty()) {
                     request.grant(resources)
+                    ConsoleLogStore.log("Permission", "đã grant ${resources.joinToString()} cho trang")
                 } else {
                     pendingWebPermissionRequest = request
                     pendingWebPermissionResources = resources
@@ -799,10 +867,12 @@ class MainActivity : ComponentActivity() {
         }
         sheetBinding?.btnAudio?.isEnabled = false
         setAudioStatus("Starting audio engine…")
+        ConsoleLogStore.log("Audio", "toggleAudio: bấm Start audio…")
         AudioProcessingService.onEngineStartFailed = { error ->
             runOnUiThread {
                 sheetBinding?.btnAudio?.isEnabled = true
                 setAudioStatus("Audio unavailable: ${error.message ?: "unknown error"}")
+                ConsoleLogStore.log("Audio", "ENGINE START FAILED: ${error.message}")
             }
         }
         AudioProcessingService.onEngineReady = { engine ->
@@ -813,16 +883,21 @@ class MainActivity : ComponentActivity() {
                 sheetBinding?.btnAudio?.text = getString(R.string.audio_stop)
                 sheetBinding?.btnAudio?.isSelected = true
                 setAudioStatus("Active · software monitor")
+                ConsoleLogStore.log("Audio", "engine ready: ${engine.sampleRate()}Hz, burst=${engine.framesPerBurst()}")
                 applyOutputMode()
                 applyNativeRouteToWebView()
             }
             virtualMicService.activateAsync(engine) { result ->
                 runOnUiThread {
                     val status = when (result) {
-                        is VirtualMicResult.Activated ->
+                        is VirtualMicResult.Activated -> {
+                            ConsoleLogStore.log("Audio", "virtual mic tier = ${result.tier.name}")
                             "Active · ${result.tier.name.lowercase().replace('_', ' ')}"
-                        is VirtualMicResult.Failed ->
+                        }
+                        is VirtualMicResult.Failed -> {
+                            ConsoleLogStore.log("Audio", "virtual mic fallback (software): ${result.reason}")
                             "Active · software monitor (${result.reason})"
+                        }
                     }
                     setAudioStatus(status)
                     applyNativeRouteToWebView()
@@ -839,6 +914,7 @@ class MainActivity : ComponentActivity() {
             virtualMicService.activeTier != VirtualMicTier.SOFTWARE_LOOPBACK -> "privileged"
             else -> "software"
         }
+        ConsoleLogStore.log("AudioRoute", "applyNativeRouteToWebView -> $mode (popup=${popupWebView != null})")
         val script = "window.__setNativeAudioMode && window.__setNativeAudioMode('$mode');"
         safeEvaluateJavascript(webView, script)
         popupWebView?.let { popup -> safeEvaluateJavascript(popup, script) }
@@ -968,6 +1044,11 @@ class MainActivity : ComponentActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != recordAudioRequestCode) return
+        ConsoleLogStore.log(
+            "Permission",
+            "onRequestPermissionsResult($requestCode): ${grantResults.joinToString()} " +
+                "(${permissions.joinToString()})"
+        )
         if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
             pendingWebPermissionRequest?.let { request ->
                 val resources = pendingWebPermissionResources
