@@ -23,8 +23,8 @@ plugins {
             applicationId "com.webviewtemplate.webviewtemplate"
             minSdk 24
             targetSdk 34
-            versionCode 23
-            versionName "1.8.0"
+            versionCode 24
+            versionName "1.9.0"
             externalNativeBuild {
                 cmake {
                     cppFlags '-std=c++17', '-O2', '-ffast-math', '-DANDROID'

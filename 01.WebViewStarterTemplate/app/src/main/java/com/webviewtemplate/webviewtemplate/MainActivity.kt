@@ -355,6 +355,17 @@ class MainActivity : ComponentActivity() {
         if (reload && webView.url != null) {
             // UA and CSS media queries are evaluated during navigation; reload only
             // the current document, preserving cookies and Chromium HTTP cache.
+            // fixtrinhduyetkoantoan.md: ghi cookie phiên đăng nhập xuống đĩa trước khi
+            // reload để Discord/TikTok/Facebook không văng đăng nhập khi đổi UA.
+            try {
+                CookieManager.getInstance().apply {
+                    setAcceptCookie(true)
+                    setAcceptThirdPartyCookies(webView, true)
+                    flush()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to flush cookies before desktop-mode reload", e)
+            }
             webView.reload()
         }
     }
@@ -436,6 +447,16 @@ class MainActivity : ComponentActivity() {
                     pendingWebPermissionResources = resources
                     ActivityCompat.requestPermissions(this@MainActivity, missing.toTypedArray(), recordAudioRequestCode)
                 }
+            }
+        }
+
+        override fun onPermissionRequestCanceled(request: PermissionRequest) {
+            super.onPermissionRequestCanceled(request)
+            // fixmicoutput.md: trang web rút yêu cầu giữa chừng (ví dụ user đóng hộp
+            // thoại) -> nhả tham chiếu để không giữ PermissionRequest gây rò bộ nhớ.
+            if (request === pendingWebPermissionRequest) {
+                pendingWebPermissionRequest = null
+                pendingWebPermissionResources = null
             }
         }
 

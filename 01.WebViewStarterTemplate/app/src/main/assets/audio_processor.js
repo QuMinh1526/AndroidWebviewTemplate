@@ -54,16 +54,20 @@
 
   // ---- Tầng constraints: ép bộ lọc WebRTC chuẩn cho mọi web (dynamicmic.md) ----
   function sanitizeAudioConstraints(constraints) {
-    // sound.md: ép chuẩn WebRTC 48kHz/16bit/mono + AEC/NS/AGC để Discord/Messenger
+    // sound.md: ép chuẩn WebRTC 48kHz/16bit/mono + AEC/AGC để Discord/Messenger
     // không phải resample từ 44.1kHz (nguyên nhân chính gây rè, méo tiếng).
+    // fixmicoutput.md: noiseSuppression=false vì NS của Android hay nhầm tiếng người
+    // ở vài giây đầu thành tiếng ồn (mic chỉ thu được đoạn cuối), còn latency=0 ép
+    // luồng thu liên tục ngay từ frame đầu thay vì đợi VAD phát hiện giọng nói.
     if (constraints.audio === true) {
       constraints.audio = {
         sampleRate: { ideal: 48000 },
         sampleSize: { ideal: 16 },
         channelCount: { ideal: 1 },
         echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+        noiseSuppression: false,
+        autoGainControl: true,
+        latency: 0
       };
       return;
     }
@@ -73,8 +77,9 @@
       a.sampleSize = { ideal: 16 };
       a.channelCount = { ideal: 1 };
       a.echoCancellation = true;
-      a.noiseSuppression = true;
+      a.noiseSuppression = false;
       a.autoGainControl = true;
+      a.latency = 0;
     }
   }
 
@@ -99,7 +104,7 @@
       settings.kind = "audio";
       settings.label = VIRTUAL_MIC_LABEL;
       settings.echoCancellation = true;
-      settings.noiseSuppression = true;
+      settings.noiseSuppression = false;
       settings.autoGainControl = true;
       settings.channelCount = 1;
       return settings;
@@ -110,7 +115,7 @@
         groupId: VIRTUAL_MIC_GROUP,
         kind: "audioinput",
         echoCancellation: [true],
-        noiseSuppression: [true],
+        noiseSuppression: [false],
         autoGainControl: [true],
         channelCount: { min: 1, max: 2 },
         sampleRate: { min: 8000, max: 48000 },

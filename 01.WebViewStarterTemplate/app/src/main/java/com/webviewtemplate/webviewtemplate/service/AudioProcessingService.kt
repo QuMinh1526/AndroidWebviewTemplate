@@ -141,7 +141,11 @@ class AudioProcessingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    /** sound.md #2: ép/mở chế độ đàm thoại MODE_IN_COMMUNICATION cho luồng voice. */
+    /**
+     * sound.md #2: ép/mở chế độ đàm thoại MODE_IN_COMMUNICATION cho luồng voice.
+     * fixmicoutput.md: khi đang ở MODE_IN_COMMUNICATION phải bật speaker để âm
+     * thanh chạy ra loa ngoài (đường đàm thoại mặc định chỉ chạy tai nghe);
+     * đồng thời tôn trọng output mode người dùng đã chọn (webview = tắt monitor).     */
     private fun forceCommunicationMode(enabled: Boolean) {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -149,6 +153,13 @@ class AudioProcessingService : Service() {
                 AudioManager.MODE_IN_COMMUNICATION
             } else {
                 AudioManager.MODE_NORMAL
+            }
+            if (enabled) {
+                val webviewOnly = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                    .getString("output_mode", "speaker") == "webview"
+                audioManager.isSpeakerphoneOn = !webviewOnly
+            } else {
+                audioManager.isSpeakerphoneOn = false
             }
         } catch (error: Exception) {
             android.util.Log.w(TAG, "Unable to switch audio mode", error)
